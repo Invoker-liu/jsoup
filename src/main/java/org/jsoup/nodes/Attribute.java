@@ -5,11 +5,12 @@ import org.jsoup.helper.Validate;
 import org.jsoup.internal.Normalizer;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Document.OutputSettings.Syntax;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
@@ -71,8 +72,17 @@ public class Attribute implements Map.Entry<String, String>, Cloneable  {
         Validate.notEmpty(key); // trimming could potentially make empty, so validate here
         if (parent != null) {
             int i = parent.indexOfKey(this.key);
-            if (i != Attributes.NotFound)
+            if (i != Attributes.NotFound) {
+                String oldKey = parent.keys[i];
                 parent.keys[i] = key;
+
+                // if tracking source positions, update the key in the range map
+                Map<String, Range.AttributeRange> ranges = parent.getRanges();
+                if (ranges != null) {
+                    Range.AttributeRange range = ranges.remove(oldKey);
+                    ranges.put(key, range);
+                }
+            }
         }
         this.key = key;
     }
@@ -99,7 +109,7 @@ public class Attribute implements Map.Entry<String, String>, Cloneable  {
      @param val the new attribute value; may be null (to set an enabled boolean attribute)
      @return the previous value (if was null; an empty string)
      */
-    public String setValue(@Nullable String val) {
+    @Override public String setValue(@Nullable String val) {
         String oldVal = this.val;
         if (parent != null) {
             int i = parent.indexOfKey(this.key);
@@ -127,6 +137,23 @@ public class Attribute implements Map.Entry<String, String>, Cloneable  {
         return StringUtil.releaseBuilder(sb);
     }
 
+    /**
+     Get the source ranges (start to end positions) in the original input source from which this attribute's <b>name</b>
+     and <b>value</b> were parsed.
+     <p>Position tracking must be enabled prior to parsing the content.</p>
+     @return the ranges for the attribute's name and value, or {@code untracked} if the attribute does not exist or its range
+     was not tracked.
+     @see org.jsoup.parser.Parser#setTrackPosition(boolean)
+     @see Attributes#sourceRange(String)
+     @see Node#sourceRange()
+     @see Element#endSourceRange()
+     @since 1.17.1
+     */
+    public Range.AttributeRange sourceRange() {
+        if (parent == null) return Range.AttributeRange.UntrackedAttr;
+        return parent.sourceRange(key);
+    }
+
     protected void html(Appendable accum, Document.OutputSettings out) throws IOException {
         html(key, val, accum, out);
     }
@@ -142,27 +169,58 @@ public class Attribute implements Map.Entry<String, String>, Cloneable  {
         accum.append(key);
         if (!shouldCollapseAttribute(key, val, out)) {
             accum.append("=\"");
-            Entities.escape(accum, Attributes.checkNotNull(val) , out, true, false, false, false);
+            Entities.escape(accum, Attributes.checkNotNull(val), out, Entities.ForAttribute); // preserves whitespace
             accum.append('"');
         }
     }
 
-    private static final Pattern xmlKeyValid = Pattern.compile("[a-zA-Z_:][-a-zA-Z0-9_:.]*");
-    private static final Pattern xmlKeyReplace = Pattern.compile("[^-a-zA-Z0-9_:.]");
-    private static final Pattern htmlKeyValid = Pattern.compile("[^\\x00-\\x1f\\x7f-\\x9f \"'/=]+");
-    private static final Pattern htmlKeyReplace = Pattern.compile("[\\x00-\\x1f\\x7f-\\x9f \"'/=]");
-
+    private static final Pattern xmlKeyReplace = Pattern.compile("[^-a-zA-Z0-9_:.]+");
+    private static final Pattern htmlKeyReplace = Pattern.compile("[\\x00-\\x1f\\x7f-\\x9f \"'/=]+");
+    /**
+     * Get a valid attribute key for the given syntax. If the key is not valid, it will be coerced into a valid key.
+     * @param key the original attribute key
+     * @param syntax HTML or XML
+     * @return the original key if it's valid; a key with invalid characters replaced with "_" otherwise; or null if a valid key could not be created.
+     */
     @Nullable public static String getValidKey(String key, Syntax syntax) {
-        // we consider HTML attributes to always be valid. XML checks key validity
-        if (syntax == Syntax.xml && !xmlKeyValid.matcher(key).matches()) {
-            key = xmlKeyReplace.matcher(key).replaceAll("");
-            return xmlKeyValid.matcher(key).matches() ? key : null; // null if could not be coerced
+        if (syntax == Syntax.xml && !isValidXmlKey(key)) {
+            key = xmlKeyReplace.matcher(key).replaceAll("_");
+            return isValidXmlKey(key) ? key : null; // null if could not be coerced
         }
-        else if (syntax == Syntax.html && !htmlKeyValid.matcher(key).matches()) {
-            key = htmlKeyReplace.matcher(key).replaceAll("");
-            return htmlKeyValid.matcher(key).matches() ? key : null; // null if could not be coerced
+        else if (syntax == Syntax.html && !isValidHtmlKey(key)) {
+            key = htmlKeyReplace.matcher(key).replaceAll("_");
+            return isValidHtmlKey(key) ? key : null; // null if could not be coerced
         }
         return key;
+    }
+
+    // perf critical in html() so using manual scan vs regex:
+    // note that we aren't using anything in supplemental space, so OK to iter charAt
+    private static boolean isValidXmlKey(String key) {
+        // =~ [a-zA-Z_:][-a-zA-Z0-9_:.]*
+        final int length = key.length();
+        if (length == 0) return false;
+        char c = key.charAt(0);
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':'))
+            return false;
+        for (int i = 1; i < length; i++) {
+            c = key.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ':' || c == '.'))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean isValidHtmlKey(String key) {
+        // =~ [\x00-\x1f\x7f-\x9f "'/=]+
+        final int length = key.length();
+        if (length == 0) return false;
+        for (int i = 0; i < length; i++) {
+            char c = key.charAt(i);
+            if ((c <= 0x1f) || (c >= 0x7f && c <= 0x9f) || c == ' ' || c == '"' || c == '\'' || c == '/' || c == '=')
+                return false;
+        }
+        return true;
     }
 
     /**
@@ -222,15 +280,12 @@ public class Attribute implements Map.Entry<String, String>, Cloneable  {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         Attribute attribute = (Attribute) o;
-        if (key != null ? !key.equals(attribute.key) : attribute.key != null) return false;
-        return val != null ? val.equals(attribute.val) : attribute.val == null;
+        return Objects.equals(key, attribute.key) && Objects.equals(val, attribute.val);
     }
 
     @Override
     public int hashCode() { // note parent not considered
-        int result = key != null ? key.hashCode() : 0;
-        result = 31 * result + (val != null ? val.hashCode() : 0);
-        return result;
+        return Objects.hash(key, val);
     }
 
     @Override

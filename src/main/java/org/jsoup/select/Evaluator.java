@@ -1,7 +1,6 @@
 package org.jsoup.select;
 
 import org.jsoup.helper.Validate;
-import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Comment;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.DocumentType;
@@ -10,8 +9,10 @@ import org.jsoup.nodes.Node;
 import org.jsoup.nodes.PseudoTextElement;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.nodes.XmlDeclaration;
+import org.jsoup.parser.ParseSettings;
 
 import java.util.List;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,10 +22,23 @@ import static org.jsoup.internal.StringUtil.normaliseWhitespace;
 
 
 /**
- * Evaluates that an element matches the selector.
+ An Evaluator tests if an element meets the selector's requirements. Obtain an evaluator for a given CSS selector
+ with {@link QueryParser#parse}. If you are executing the same selector on many elements (or documents), it
+ can be more efficient to compile and reuse an Evaluator than to reparse the selector on each invocation of select().
+ <p>Evaluators are thread-safe and may be used concurrently across multiple documents.</p>
  */
 public abstract class Evaluator {
     protected Evaluator() {
+    }
+
+    /**
+     Provides a Predicate for this Evaluator, matching the test Element.
+     * @param root the root Element, for match evaluation
+     * @return a predicate that accepts an Element to test for matches with this Evaluator
+     * @since 1.17.1
+     */
+    public Predicate<Element> asPredicate(Element root) {
+        return element -> matches(root, element);
     }
 
     /**
@@ -63,7 +77,7 @@ public abstract class Evaluator {
 
         @Override
         public boolean matches(Element root, Element element) {
-            return (element.normalName().equals(tagName));
+            return (element.nameIs(tagName));
         }
 
         @Override protected int cost() {
@@ -76,9 +90,30 @@ public abstract class Evaluator {
         }
     }
 
+    /**
+     * Evaluator for tag name that starts with prefix; used for ns|*
+     */
+    public static final class TagStartsWith extends Evaluator {
+        private final String tagName;
+
+        public TagStartsWith(String tagName) {
+            this.tagName = tagName;
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            return (element.normalName().startsWith(tagName));
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%s|*", tagName);
+        }
+    }
+
 
     /**
-     * Evaluator for tag name that ends with
+     * Evaluator for tag name that ends with suffix; used for *|el
      */
     public static final class TagEndsWith extends Evaluator {
         private final String tagName;
@@ -94,7 +129,7 @@ public abstract class Evaluator {
 
         @Override
         public String toString() {
-            return String.format("%s", tagName);
+            return String.format("*|%s", tagName);
         }
     }
 
@@ -138,7 +173,7 @@ public abstract class Evaluator {
         }
 
         @Override protected int cost() {
-            return 6; // does whitespace scanning
+            return 8; // does whitespace scanning; more than .contains()
         }
 
         @Override
@@ -180,7 +215,7 @@ public abstract class Evaluator {
         private final String keyPrefix;
 
         public AttributeStarting(String keyPrefix) {
-            Validate.notEmpty(keyPrefix);
+            Validate.notNull(keyPrefix); // OK to be empty - will find elements with any attributes
             this.keyPrefix = lowerCase(keyPrefix);
         }
 
@@ -327,8 +362,8 @@ public abstract class Evaluator {
      * Evaluator for attribute name/value matching (value regex matching)
      */
     public static final class AttributeWithValueMatching extends Evaluator {
-        String key;
-        Pattern pattern;
+        final String key;
+        final Pattern pattern;
 
         public AttributeWithValueMatching(String key, Pattern pattern) {
             this.key = normalize(key);
@@ -355,8 +390,8 @@ public abstract class Evaluator {
      * Abstract evaluator for attribute name/value matching
      */
     public abstract static class AttributeKeyPair extends Evaluator {
-        String key;
-        String value;
+        final String key;
+        final String value;
 
         public AttributeKeyPair(String key, String value) {
             this(key, value, true);
@@ -495,38 +530,43 @@ public abstract class Evaluator {
 
 
     public static abstract class CssNthEvaluator extends Evaluator {
-    	protected final int a, b;
+        /** Step */
+        protected final int a;
+        /** Offset */
+        protected final int b;
 
-    	public CssNthEvaluator(int a, int b) {
-    		this.a = a;
-    		this.b = b;
-    	}
-    	public CssNthEvaluator(int b) {
-    		this(0,b);
-    	}
+        public CssNthEvaluator(int step, int offset) {
+            this.a = step;
+            this.b = offset;
+        }
 
-    	@Override
-    	public boolean matches(Element root, Element element) {
-    		final Element p = element.parent();
-    		if (p == null || (p instanceof Document)) return false;
+        public CssNthEvaluator(int offset) {
+            this(0, offset);
+        }
 
-    		final int pos = calculatePosition(root, element);
-    		if (a == 0) return pos == b;
+        @Override
+        public boolean matches(Element root, Element element) {
+            final Element p = element.parent();
+            if (p == null || (p instanceof Document)) return false;
 
-    		return (pos-b)*a >= 0 && (pos-b)%a==0;
-    	}
+            final int pos = calculatePosition(root, element);
+            if (a == 0) return pos == b;
 
-		@Override
-		public String toString() {
-			if (a == 0)
-				return String.format(":%s(%d)",getPseudoClass(), b);
-			if (b == 0)
-				return String.format(":%s(%dn)",getPseudoClass(), a);
-			return String.format(":%s(%dn%+d)", getPseudoClass(),a, b);
-		}
+            return (pos - b) * a >= 0 && (pos - b) % a == 0;
+        }
 
-		protected abstract String getPseudoClass();
-		protected abstract int calculatePosition(Element root, Element element);
+        @Override
+        public String toString() {
+            String format =
+                (a == 0) ? ":%s(%3$d)"    // only offset (b)
+                : (b == 0) ? ":%s(%2$dn)" // only step (a)
+                : ":%s(%2$dn%3$+d)";      // step, offset
+            return String.format(format, getPseudoClass(), a, b);
+        }
+
+        protected abstract String getPseudoClass();
+
+        protected abstract int calculatePosition(Element root, Element element);
     }
 
 
@@ -536,19 +576,19 @@ public abstract class Evaluator {
      * @see IndexEquals
      */
     public static final class IsNthChild extends CssNthEvaluator {
+        public IsNthChild(int step, int offset) {
+            super(step, offset);
+        }
 
-    	public IsNthChild(int a, int b) {
-    		super(a,b);
-		}
+        @Override
+        protected int calculatePosition(Element root, Element element) {
+            return element.elementSiblingIndex() + 1;
+        }
 
-		protected int calculatePosition(Element root, Element element) {
-			return element.elementSiblingIndex()+1;
-		}
-
-
-		protected String getPseudoClass() {
-			return "nth-child";
-		}
+        @Override
+        protected String getPseudoClass() {
+            return "nth-child";
+        }
     }
 
     /**
@@ -557,9 +597,9 @@ public abstract class Evaluator {
      * @see IndexEquals
      */
     public static final class IsNthLastChild extends CssNthEvaluator {
-    	public IsNthLastChild(int a, int b) {
-    		super(a,b);
-    	}
+        public IsNthLastChild(int step, int offset) {
+            super(step, offset);
+        }
 
         @Override
         protected int calculatePosition(Element root, Element element) {
@@ -579,11 +619,11 @@ public abstract class Evaluator {
      *
      */
     public static class IsNthOfType extends CssNthEvaluator {
-        public IsNthOfType(int a, int b) {
-            super(a, b);
+        public IsNthOfType(int step, int offset) {
+            super(step, offset);
         }
 
-        protected int calculatePosition(Element root, Element element) {
+        @Override protected int calculatePosition(Element root, Element element) {
             Element parent = element.parent();
             if (parent == null)
                 return 0;
@@ -605,9 +645,8 @@ public abstract class Evaluator {
     }
 
     public static class IsNthLastOfType extends CssNthEvaluator {
-
-        public IsNthLastOfType(int a, int b) {
-            super(a, b);
+        public IsNthLastOfType(int step, int offset) {
+            super(step, offset);
         }
 
         @Override
@@ -706,21 +745,22 @@ public abstract class Evaluator {
     }
 
     public static final class IsEmpty extends Evaluator {
-		@Override
-		public boolean matches(Element root, Element element) {
-        	List<Node> family = element.childNodes();
-            for (Node n : family) {
-                if (n instanceof TextNode)
-                    return ((TextNode)n).isBlank();
-                if (!(n instanceof Comment || n instanceof XmlDeclaration || n instanceof DocumentType))
-                    return false;
+        @Override
+        public boolean matches(Element root, Element el) {
+            for (Node n = el.firstChild(); n != null; n = n.nextSibling()) {
+                if (n instanceof TextNode) {
+                    if (!((TextNode) n).isBlank())
+                        return false; // non-blank text: not empty
+                } else if (!(n instanceof Comment || n instanceof XmlDeclaration || n instanceof DocumentType))
+                    return false; // non "blank" element: not empty
             }
-        	return true;
-		}
-    	@Override
-    	public String toString() {
-    		return ":empty";
-    	}
+            return true;
+        }
+
+        @Override
+        public String toString() {
+            return ":empty";
+        }
     }
 
     /**
@@ -729,7 +769,7 @@ public abstract class Evaluator {
      * @author ant
      */
     public abstract static class IndexEvaluator extends Evaluator {
-        int index;
+        final int index;
 
         public IndexEvaluator(int index) {
             this.index = index;
@@ -969,7 +1009,7 @@ public abstract class Evaluator {
             List<TextNode> textNodes = element.textNodes();
             for (TextNode textNode : textNodes) {
                 PseudoTextElement pel = new PseudoTextElement(
-                    org.jsoup.parser.Tag.valueOf(element.tagName()), element.baseUri(), element.attributes());
+                    org.jsoup.parser.Tag.valueOf(element.tagName(), element.tag().namespace(), ParseSettings.preserveCase), element.baseUri(), element.attributes());
                 textNode.replaceWith(pel);
                 pel.appendChild(textNode);
             }

@@ -1,9 +1,14 @@
 package org.jsoup.select;
 
+import org.jsoup.internal.Functions;
+import org.jsoup.internal.SoftPool;
+import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Element;
-import org.jsoup.nodes.Node;
+import org.jsoup.nodes.NodeIterator;
 
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
+import java.util.Map;
 
 /**
  * Base structural evaluator.
@@ -21,23 +26,14 @@ abstract class StructuralEvaluator extends Evaluator {
         threadMemo = ThreadLocal.withInitial(IdentityHashMap::new);
 
     boolean memoMatches(final Element root, final Element element) {
-        // not using computeIfAbsent, as the lambda impl requires a new Supplier closure object on every hit: tons of GC
-        IdentityHashMap<Element, IdentityHashMap<Element, Boolean>> rootMemo = threadMemo.get();
-        IdentityHashMap<Element, Boolean> memo = rootMemo.get(root);
-        if (memo == null) {
-            memo = new IdentityHashMap<>();
-            rootMemo.put(root, memo);
-        }
-        Boolean matches = memo.get(element);
-        if (matches == null) {
-            matches = evaluator.matches(root, element);
-            memo.put(element, matches);
-        }
-        return matches;
+        Map<Element, IdentityHashMap<Element, Boolean>> rootMemo = threadMemo.get();
+        Map<Element, Boolean> memo = rootMemo.computeIfAbsent(root, Functions.identityMapFunction());
+        return memo.computeIfAbsent(element, key -> evaluator.matches(root, key));
     }
 
     @Override protected void reset() {
         threadMemo.get().clear();
+        evaluator.reset();
         super.reset();
     }
 
@@ -57,21 +53,48 @@ abstract class StructuralEvaluator extends Evaluator {
     }
 
     static class Has extends StructuralEvaluator {
-        final Collector.FirstFinder finder;
+        static final SoftPool<NodeIterator<Element>> ElementIterPool =
+            new SoftPool<>(() -> new NodeIterator<>(new Element("html"), Element.class));
+        // the element here is just a placeholder so this can be final - gets set in restart()
+
+        private final boolean checkSiblings; // evaluating against siblings (or children)
 
         public Has(Evaluator evaluator) {
             super(evaluator);
-            finder = new Collector.FirstFinder(evaluator);
+            checkSiblings = evalWantsSiblings(evaluator);
         }
 
-        @Override
-        public boolean matches(Element root, Element element) {
-            // for :has, we only want to match children (or below), not the input element. And we want to minimize GCs
-            for (int i = 0; i < element.childNodeSize(); i++) {
-                Node node = element.childNode(i);
-                if (node instanceof Element) {
-                    Element match = finder.find(element, (Element) node);
-                    if (match != null)
+        @Override public boolean matches(Element root, Element element) {
+            if (checkSiblings) { // evaluating against siblings
+                for (Element sib = element.firstElementSibling(); sib != null; sib = sib.nextElementSibling()) {
+                    if (sib != element && evaluator.matches(element, sib)) { // don't match against self
+                        return true;
+                    }
+                }
+            }
+            // otherwise we only want to match children (or below), and not the input element. And we want to minimize GCs so reusing the Iterator obj
+            NodeIterator<Element> it = ElementIterPool.borrow();
+            it.restart(element);
+            try {
+                while (it.hasNext()) {
+                    Element el = it.next();
+                    if (el == element) continue; // don't match self, only descendants
+                    if (evaluator.matches(element, el)) {
+                        return true;
+                    }
+                }
+            } finally {
+                ElementIterPool.release(it);
+            }
+            return false;
+        }
+
+        /* Test if the :has sub-clause wants sibling elements (vs nested elements) - will be a Combining eval */
+        private static boolean evalWantsSiblings(Evaluator eval) {
+            if (eval instanceof CombiningEvaluator) {
+                CombiningEvaluator ce = (CombiningEvaluator) eval;
+                for (Evaluator innerEval : ce.evaluators) {
+                    if (innerEval instanceof PreviousSibling || innerEval instanceof ImmediatePreviousSibling)
                         return true;
                 }
             }
@@ -85,6 +108,27 @@ abstract class StructuralEvaluator extends Evaluator {
         @Override
         public String toString() {
             return String.format(":has(%s)", evaluator);
+        }
+    }
+
+    /** Implements the :is(sub-query) pseudo-selector */
+    static class Is extends StructuralEvaluator {
+        public Is(Evaluator evaluator) {
+            super(evaluator);
+        }
+
+        @Override
+        public boolean matches(Element root, Element element) {
+            return evaluator.matches(root, element);
+        }
+
+        @Override protected int cost() {
+            return 2 + evaluator.cost();
+        }
+
+        @Override
+        public String toString() {
+            return String.format(":is(%s)", evaluator);
         }
     }
 
@@ -108,8 +152,11 @@ abstract class StructuralEvaluator extends Evaluator {
         }
     }
 
-    static class Parent extends StructuralEvaluator {
-        public Parent(Evaluator evaluator) {
+    /**
+     Any Ancestor (i.e., ascending parent chain.).
+     */
+    static class Ancestor extends StructuralEvaluator {
+        public Ancestor(Evaluator evaluator) {
             super(evaluator);
         }
 
@@ -118,19 +165,17 @@ abstract class StructuralEvaluator extends Evaluator {
             if (root == element)
                 return false;
 
-            Element parent = element.parent();
-            while (parent != null) {
+            for (Element parent = element.parent(); parent != null; parent = parent.parent()) {
                 if (memoMatches(root, parent))
                     return true;
                 if (parent == root)
                     break;
-                parent = parent.parent();
             }
             return false;
         }
 
         @Override protected int cost() {
-            return 2 * evaluator.cost();
+            return 8 * evaluator.cost(); // probably lower than has(), but still significant, depending on doc and el depth.
         }
 
         @Override
@@ -139,27 +184,55 @@ abstract class StructuralEvaluator extends Evaluator {
         }
     }
 
-    static class ImmediateParent extends StructuralEvaluator {
-        public ImmediateParent(Evaluator evaluator) {
-            super(evaluator);
+    /**
+     Holds a list of evaluators for one > two > three immediate parent matches, and the final direct evaluator under
+     test. To match, these are effectively ANDed together, starting from the last, matching up to the first.
+     */
+    static class ImmediateParentRun extends Evaluator {
+        final ArrayList<Evaluator> evaluators = new ArrayList<>();
+        int cost = 2;
+
+        public ImmediateParentRun(Evaluator evaluator) {
+            evaluators.add(evaluator);
+            cost += evaluator.cost();
+        }
+
+        void add(Evaluator evaluator) {
+            evaluators.add(evaluator);
+            cost += evaluator.cost();
         }
 
         @Override
         public boolean matches(Element root, Element element) {
-            if (root == element)
-                return false;
+            if (element == root)
+                return false; // cannot match as the second eval (first parent test) would be above the root
 
-            Element parent = element.parent();
-            return parent != null && memoMatches(root, parent);
+            for (int i = evaluators.size() -1; i >= 0; --i) {
+                if (element == null)
+                    return false;
+                Evaluator eval = evaluators.get(i);
+                if (!eval.matches(root, element))
+                    return false;
+                element = element.parent();
+            }
+            return true;
         }
 
         @Override protected int cost() {
-            return 1 + evaluator.cost();
+            return cost;
+        }
+
+        @Override
+        protected void reset() {
+            for (Evaluator evaluator : evaluators) {
+                evaluator.reset();
+            }
+            super.reset();
         }
 
         @Override
         public String toString() {
-            return String.format("%s > ", evaluator);
+            return StringUtil.join(evaluators, " > ");
         }
     }
 
@@ -172,11 +245,9 @@ abstract class StructuralEvaluator extends Evaluator {
         public boolean matches(Element root, Element element) {
             if (root == element) return false;
 
-            Element sibling = element.firstElementSibling();
-            while (sibling != null) {
-                if (sibling == element) break;
-                if (memoMatches(root, sibling)) return true;
-                sibling = sibling.nextElementSibling();
+            for (Element sib = element.firstElementSibling(); sib != null; sib = sib.nextElementSibling()) {
+                if (sib == element) break;
+                if (memoMatches(root, sib)) return true;
             }
 
             return false;

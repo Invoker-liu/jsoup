@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +27,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static org.jsoup.nodes.NodeIteratorTest.assertIterates;
+import static org.jsoup.nodes.NodeIteratorTest.trackSeen;
+import static org.jsoup.select.SelectorTest.assertSelectedOwnText;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -206,6 +210,28 @@ public class ElementTest {
 
         doc = Jsoup.parse("<p>Hello  <div>\n  there</div></p>");
         assertEquals("Hello  \n  there", doc.wholeText());
+    }
+
+    @Test void wholeTextRuns() {
+        Document doc = Jsoup.parse("<div><p id=1></p><p id=2> </p><p id=3>.  </p>");
+
+        Element p1 = doc.expectFirst("#1");
+        Element p2 = doc.expectFirst("#2");
+        Element p3 = doc.expectFirst("#3");
+
+        assertEquals("", p1.wholeText());
+        assertEquals(" ", p2.wholeText());
+        assertEquals(".  ", p3.wholeText());
+    }
+
+    @Test void buttonTextHasSpace() {
+        // https://github.com/jhy/jsoup/issues/2105
+        Document doc = Jsoup.parse("<html><button>Reply</button><button>All</button></html>");
+        String text = doc.body().text();
+        String wholetext = doc.body().wholeText();
+
+        assertEquals("Reply All", text);
+        assertEquals("ReplyAll", wholetext);
     }
 
     @Test
@@ -2566,6 +2592,76 @@ public class ElementTest {
         assertEquals("div", el.cssSelector());
     }
 
+    @Test void cssSelectorDoesntStackOverflow() {
+        // https://github.com/jhy/jsoup/issues/2001
+        Element element = new Element("element");
+        Element root = element;
+
+        // Create a long chain of elements
+        for (int i = 0; i < 5000; i++) {
+            Element elem2 = new Element("element" + i);
+            element.appendChild(elem2);
+            element = elem2;
+        }
+
+        String selector = element.cssSelector(); // would overflow in cssSelector parent() recurse
+        Evaluator eval = QueryParser.parse(selector);
+
+        assertEquals(eval.toString(), selector);
+        assertTrue(selector.startsWith("element > element0 >"));
+        assertTrue(selector.endsWith("8 > element4999"));
+
+        Elements elements = root.select(selector); // would overflow in nested And ImmediateParent chain eval
+        assertEquals(1, elements.size());
+        assertEquals(element, elements.first());
+    }
+
+    @Test void cssSelectorWithBracket() {
+        // https://github.com/jhy/jsoup/issues/2146
+        Document doc = Jsoup.parse("<div class='a[foo]'>One</div><div class='b[bar]'>Two</div>");
+        Element div = doc.expectFirst("div");
+        String selector = div.cssSelector();
+        assertEquals("html > body > div.a\\[foo\\]", selector); // would fail with "Did not find balanced marker", consumeSubquery was not handling escapes
+
+        Elements selected = doc.select(selector);
+        assertEquals(1, selected.size());
+        assertEquals(selected.first(), div);
+    }
+
+    @Test void cssSelectorUnbalanced() {
+        // https://github.com/jhy/jsoup/issues/2146
+        Document doc = Jsoup.parse("<div class='a(foo'>One</div><div class='a-bar'>Two</div>");
+        Element div = doc.expectFirst("div");
+        String selector = div.cssSelector();
+        assertEquals("html > body > div.a\\(foo", selector);
+
+        Elements selected = doc.select(selector);
+        assertEquals(1, selected.size());
+        assertEquals(selected.first(), div);
+    }
+
+    @Test void cssSelectorWithAsterisk() {
+        // https://github.com/jhy/jsoup/issues/2169
+        Document doc = Jsoup.parse("<div class='vds-items_flex-end [&amp;_>_*:first-child]:vds-pt_0'>One</div><div class='vds-items_flex-end'>Two</div>");
+        Element div = doc.expectFirst("div");
+        String selector = div.cssSelector();
+        assertEquals("html > body > div.vds-items_flex-end.\\[\\&_\\>_\\*\\:first-child\\]\\:vds-pt_0", selector);
+
+        Elements selected = doc.select(selector);
+        assertEquals(1, selected.size());
+        assertEquals(selected.first(), div);
+    }
+
+    @Test void cssSelectorWithPipe() {
+        // https://github.com/jhy/jsoup/issues/1998
+        Document doc = Jsoup.parse("<div><span class='|'>One</div>");
+        Element span = doc.expectFirst("div span");
+        String selector = span.cssSelector();
+        assertEquals("html > body > div > span.\\|", selector);
+        Elements selected = doc.select(selector);
+        assertSelectedOwnText(selected, "One");
+    }
+
     @Test void orphanSiblings() {
         Element el = new Element("div");
         assertEquals(0, el.siblingElements().size());
@@ -2709,6 +2805,68 @@ public class ElementTest {
         assertEquals("Hello", parse.data());
     }
 
+    @Test void datanodesOutputCdataInXhtml() {
+        String html = "<p><script>1 && 2</script><style>3 && 4</style> 5 &amp;&amp; 6</p>";
+        Document doc = Jsoup.parse(html); // parsed as HTML
+        String out = TextUtil.normalizeSpaces(doc.body().html());
+        assertEquals(html, out);
+        Element scriptEl = doc.expectFirst("script");
+        DataNode scriptDataNode = (DataNode) scriptEl.childNode(0);
+        assertEquals("1 && 2", scriptDataNode.getWholeData());
+
+        doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml);
+        Element p = doc.expectFirst("p");
+        String xml = p.html();
+        assertEquals(
+            "<script>//<![CDATA[\n" +
+                "1 && 2\n" +
+                "//]]></script>\n" +
+                "<style>/*<![CDATA[*/\n" +
+                "3 && 4\n" +
+                "/*]]>*/</style> 5 &amp;&amp; 6",
+            xml);
+
+        Document xmlDoc = Jsoup.parse(xml, Parser.xmlParser());
+        assertEquals(xml, xmlDoc.html());
+        Element scriptXmlEl = xmlDoc.expectFirst("script");
+        TextNode scriptText = (TextNode) scriptXmlEl.childNode(0);
+        assertEquals("//", scriptText.getWholeText());
+        CDataNode scriptCdata = (CDataNode) scriptXmlEl.childNode(1);
+        assertEquals("\n1 && 2\n//", scriptCdata.text());
+    }
+
+    @Test void datanodesOutputExistingCdataInXhtml() {
+        String html = "<p><script>//<![CDATA[\n1 && 2\n//]]></script><style>\n/*<![CDATA[*/3 && 4\n/*]]>*/</style> 5 &amp;&amp; 6</p>";;
+        Document doc = Jsoup.parse(html); // parsed as HTML
+        String out = TextUtil.normalizeSpaces(doc.body().html());
+        assertEquals("<p><script>//<![CDATA[1 && 2//]]></script><style>/*<![CDATA[*/3 && 4/*]]>*/</style> 5 &amp;&amp; 6</p>", out);
+        Element scriptEl = doc.expectFirst("script");
+        DataNode scriptDataNode = (DataNode) scriptEl.childNode(0);
+        assertEquals("//<![CDATA[\n" +
+            "1 && 2\n" +
+            "//]]>", scriptDataNode.getWholeData());
+
+        doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml);
+        Element p = doc.expectFirst("p");
+        String xml = p.html();
+        assertEquals(
+            "<script>//<![CDATA[\n" +
+                "1 && 2\n" +
+                "//]]></script>\n" +
+                "<style>\n" +
+                "/*<![CDATA[*/3 && 4\n" +
+                "/*]]>*/</style> 5 &amp;&amp; 6",
+            xml);
+
+        Document xmlDoc = Jsoup.parse(xml, Parser.xmlParser());
+        assertEquals(xml, xmlDoc.html());
+        Element scriptXmlEl = xmlDoc.expectFirst("script");
+        TextNode scriptText = (TextNode) scriptXmlEl.childNode(0);
+        assertEquals("//", scriptText.getWholeText());
+        CDataNode scriptCdata = (CDataNode) scriptXmlEl.childNode(1);
+        assertEquals("\n1 && 2\n//", scriptCdata.text());
+    }
+
     @Test void outerHtmlAppendable() {
         // tests not string builder flow
         Document doc = Jsoup.parse("<div>One</div>");
@@ -2748,5 +2906,111 @@ public class ElementTest {
             " </tbody>\n" +
             "</table>", out);
         // todo - I would prefer the </td> to wrap down there - but need to reimplement pretty printer to simplify and track indented state
+    }
+
+    @Test void emptyDetachesChildren() {
+        String html = "<div><p>One<p>Two</p>Three</div>";
+        Document doc = Jsoup.parse(html);
+        Element div = doc.expectFirst("div");
+        assertEquals(3, div.childNodeSize());
+
+        List<Node> childNodes = div.childNodes();
+
+        div.empty();
+        assertEquals(0, div.childNodeSize());
+        assertEquals(3, childNodes.size()); // copied before removing
+        for (Node childNode : childNodes) {
+            assertNull(childNode.parentNode);
+        }
+
+        Element p = (Element) childNodes.get(0);
+        assertEquals(p, p.childNode(0).parentNode()); // TextNode "One" still has parent p, as detachment is only on div element
+    }
+
+    @Test void emptyAndAddPreviousChild() {
+        String html = "<div><p>One<p>Two<p>Three</div>";
+        Document doc = Jsoup.parse(html);
+        Element div = doc.expectFirst("div");
+        Element p = div.expectFirst("p");
+        div
+            .empty()
+            .appendChild(p);
+
+        assertEquals("<p>One</p>", div.html());
+    }
+
+    @Test void emptyAndAddPreviousDescendant() {
+        String html = "<header><div><p>One<p>Two<p>Three</div></header>";
+        Document doc = Jsoup.parse(html);
+        Element header = doc.expectFirst("header");
+        Element p = header.expectFirst("p");
+        header
+            .empty()
+            .appendChild(p);
+
+        assertEquals("<p>One</p>", header.html());
+    }
+
+    @Test void xmlSyntaxSetsEscapeMode() {
+        String html = "Foo&nbsp;&Succeeds;";
+        Document doc = Jsoup.parse(html);
+        doc.outputSettings().charset("ascii"); // so we can see the zws
+        assertEquals("Foo&nbsp;&#x227b;", doc.body().html());
+
+        doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml);
+        String out = doc.body().html();
+        assertEquals("Foo&#xa0;&#x227b;", out);
+
+        // can set back if desired
+        doc.outputSettings().escapeMode(Entities.EscapeMode.extended);
+        assertEquals("Foo&nbsp;&succ;", doc.body().html()); // succ is alias for Succeeds, and first hit in entities
+    }
+
+    @Test void attribute() {
+        String html = "<p CLASS='yes'>One</p>";
+        Document doc = Jsoup.parse(html);
+        Element p = doc.expectFirst("p");
+        Attribute attr = p.attribute("class"); // HTML parse lower-cases names
+        assertNotNull(attr);
+        assertEquals("class", attr.getKey());
+        assertEquals("yes", attr.getValue());
+        assertFalse(attr.sourceRange().nameRange().start().isTracked()); // tracking disabled
+
+        assertNull(p.attribute("CLASS")); // no such key
+
+        attr.setKey("CLASS"); // set preserves input case
+        attr.setValue("YES");
+
+        assertEquals("<p CLASS=\"YES\">One</p>", p.outerHtml());
+        assertEquals("CLASS=\"YES\"", attr.html());
+    }
+
+    @Test void testSelectStream() {
+        Document doc = Jsoup.parse("<div>Hello world</div>");
+        Element div = doc.select("div").stream().findFirst().orElse(null);
+
+        assertEquals("Hello world", div.text());
+
+        div = doc.selectStream("div").findFirst().orElse(null);
+
+        assertEquals("Hello world", div.text());
+    }
+
+    @Test void elementIsIterable() {
+        Document doc = Jsoup.parse("<div><a id=1>One</a> Two <a id=2>Three<b>Four</a><a id=3>Five</a></div>");
+        String expect = "div;a#1;a#2;b;b;a#3;"; // elements only, in doc order
+        Element div = doc.expectFirst("div");
+
+        // for each pattern
+        StringBuilder seen = new StringBuilder();
+        for (Element el: div) {
+            trackSeen(el, seen);
+        }
+        assertEquals(expect, seen.toString());
+
+        // iterator
+        seen = new StringBuilder();
+        Iterator<Element> iterator = div.iterator();
+        assertIterates(iterator, expect);
     }
 }

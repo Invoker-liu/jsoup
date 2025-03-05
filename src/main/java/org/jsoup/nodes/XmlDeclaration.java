@@ -2,29 +2,31 @@ package org.jsoup.nodes;
 
 import org.jsoup.SerializationException;
 import org.jsoup.internal.StringUtil;
-import org.jsoup.helper.Validate;
 
 import java.io.IOException;
 
 /**
- * An XML Declaration.
+ * An XML Declaration. Includes support for treating the declaration contents as pseudo attributes.
  */
 public class XmlDeclaration extends LeafNode {
-    // todo this impl isn't really right, the data shouldn't be attributes, just a run of text after the name
-    private final boolean isProcessingInstruction; // <! if true, <? if false, declaration (and last data char should be ?)
+
+    /**
+     First char is `!` if isDeclaration, like in {@code  <!ENTITY ...>}.
+     Otherwise, is `?`, a processing instruction, like {@code <?xml .... ?>} (and note trailing `?`).
+     */
+    private final boolean isDeclaration;
 
     /**
      * Create a new XML declaration
      * @param name of declaration
-     * @param isProcessingInstruction is processing instruction
+     * @param isDeclaration {@code true} if a declaration (first char is `!`), otherwise a processing instruction (first char is `?`).
      */
-    public XmlDeclaration(String name, boolean isProcessingInstruction) {
-        Validate.notNull(name);
-        value = name;
-        this.isProcessingInstruction = isProcessingInstruction;
+    public XmlDeclaration(String name, boolean isDeclaration) {
+        super(name);
+        this.isDeclaration = isDeclaration;
     }
 
-    public String nodeName() {
+    @Override public String nodeName() {
         return "#declaration";
     }
 
@@ -60,7 +62,7 @@ public class XmlDeclaration extends LeafNode {
                 accum.append(key);
                 if (!val.isEmpty()) {
                     accum.append("=\"");
-                    Entities.escape(accum, val, out, true, false, false, false);
+                    Entities.escape(accum, val, out, Entities.ForAttribute);
                     accum.append('"');
                 }
             }
@@ -71,11 +73,11 @@ public class XmlDeclaration extends LeafNode {
     void outerHtmlHead(Appendable accum, int depth, Document.OutputSettings out) throws IOException {
         accum
             .append("<")
-            .append(isProcessingInstruction ? "!" : "?")
+            .append(isDeclaration ? "!" : "?")
             .append(coreValue());
         getWholeDeclaration(accum, out);
         accum
-            .append(isProcessingInstruction ? "!" : "?")
+            .append(isDeclaration ? "" : "?")
             .append(">");
     }
 

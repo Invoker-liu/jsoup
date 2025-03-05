@@ -7,7 +7,9 @@ import org.jsoup.integration.ParseTest;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.Authenticator;
 import java.net.MalformedURLException;
+import java.net.PasswordAuthentication;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -153,27 +155,6 @@ public class HttpConnectionTest {
         assertEquals(0, res.cookies().size());
     }
 
-    @Test public void ignoresEmptyCookieNameAndVals() {
-        // prep http response header map
-        Map<String, List<String>> headers = new HashMap<>();
-        List<String> cookieStrings = new ArrayList<>();
-        cookieStrings.add(null);
-        cookieStrings.add("");
-        cookieStrings.add("one");
-        cookieStrings.add("two=");
-        cookieStrings.add("three=;");
-        cookieStrings.add("four=data; Domain=.example.com; Path=/");
-
-        headers.put("Set-Cookie", cookieStrings);
-        HttpConnection.Response res = new HttpConnection.Response();
-        res.processResponseHeaders(headers);
-        assertEquals(4, res.cookies().size());
-        assertEquals("", res.cookie("one"));
-        assertEquals("", res.cookie("two"));
-        assertEquals("", res.cookie("three"));
-        assertEquals("data", res.cookie("four"));
-    }
-
     @Test public void connectWithUrl() throws MalformedURLException {
         Connection con = HttpConnection.connect(new URL("http://example.com"));
         assertEquals("http://example.com", con.request().url().toExternalForm());
@@ -260,6 +241,12 @@ public class HttpConnectionTest {
         assertEquals("https://test.com/foo%20bar/%5BOne%5D?q=white+space#frag", url2.toExternalForm());
     }
 
+    @Test public void encodeUrlSupplementary() throws MalformedURLException {
+        URL url1 = new URL("https://example.com/tools/test💩.html"); // = "/tools/test\uD83D\uDCA9.html"
+        URL url2 = new UrlBuilder(url1).build();
+        assertEquals("https://example.com/tools/test%F0%9F%92%A9.html", url2.toExternalForm());
+    }
+
     @Test void encodedUrlDoesntDoubleEncode() throws MalformedURLException {
         URL url1 = new URL("https://test.com/foo%20bar/%5BOne%5D?q=white+space#frag%20ment");
         URL url2 = new UrlBuilder(url1).build();
@@ -272,8 +259,8 @@ public class HttpConnectionTest {
         URL url1 = new URL("https://test.com/[foo] bar+/%5BOne%5D?q=white space#frag ment");
         URL url2 = new UrlBuilder(url1).build();
         URL url3 = new UrlBuilder(url2).build();
-        assertEquals("https://test.com/[foo]%20bar+/%5BOne%5D?q=white+space#frag%20ment", url2.toExternalForm());
-        assertEquals("https://test.com/[foo]%20bar+/%5BOne%5D?q=white+space#frag%20ment", url3.toExternalForm());
+        assertEquals("https://test.com/%5Bfoo%5D%20bar+/%5BOne%5D?q=white+space#frag%20ment", url2.toExternalForm());
+        assertEquals("https://test.com/%5Bfoo%5D%20bar+/%5BOne%5D?q=white+space#frag%20ment", url3.toExternalForm());
     }
 
     @Test void connectToEncodedUrl() {
@@ -357,5 +344,47 @@ public class HttpConnectionTest {
             assertEquals("The supplied URL, 'jsoup.org/test', is malformed. Make sure it is an absolute URL, and starts with 'http://' or 'https://'. See https://jsoup.org/cookbook/extracting-data/working-with-urls", e.getMessage());
         }
         assertTrue(threw);
+    }
+
+    @Test void setHeaderWithUnicodeValue() {
+        Connection connect = Jsoup.connect("https://example.com");
+        String value = "/foo/我的";
+        connect.header("Key", value);
+
+        String actual = connect.request().header("Key");
+        assertEquals(value, actual);
+    }
+
+    @Test void setAuth() throws MalformedURLException {
+        Connection con = Jsoup.newSession();
+
+        assertNull(con.request().auth());
+
+        RequestAuthenticator auth1 = new RequestAuthenticator() {
+            @Override public PasswordAuthentication authenticate(Context auth) {
+                return auth.credentials("foo", "bar");
+            }
+        };
+
+        RequestAuthenticator auth2 = new RequestAuthenticator() {
+            @Override public PasswordAuthentication authenticate(Context auth) {
+                return auth.credentials("qux", "baz");
+            }
+        };
+
+        con.auth(auth1);
+        assertSame(con.request().auth(), auth1);
+
+        con.auth(auth2);
+        assertSame(con.request().auth(), auth2);
+
+        con.request().auth(auth1);
+        assertSame(con.request().auth(), auth1);
+
+        PasswordAuthentication creds = auth1.authenticate(
+            new RequestAuthenticator.Context(new URL("http://example.com"), Authenticator.RequestorType.SERVER, "Realm"));
+        assertNotNull(creds);
+        assertEquals("foo", creds.getUserName());
+        assertEquals("bar", new String(creds.getPassword()));
     }
 }

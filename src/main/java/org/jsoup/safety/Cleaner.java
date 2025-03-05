@@ -10,12 +10,12 @@ import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.ParseErrorList;
 import org.jsoup.parser.Parser;
-import org.jsoup.parser.Tag;
 import org.jsoup.select.NodeTraversor;
 import org.jsoup.select.NodeVisitor;
 
 import java.util.List;
 
+import static org.jsoup.internal.SharedConstants.DummyUri;
 
 /**
  The safelist based HTML cleaner. Use to ensure that end-user provided HTML contains only the elements and attributes
@@ -114,10 +114,11 @@ public class Cleaner {
      @return true if no tags or attributes need to be removed; false if they do
      */
     public boolean isValidBodyHtml(String bodyHtml) {
-        Document clean = Document.createShell("");
-        Document dirty = Document.createShell("");
+        String baseUri = (safelist.preserveRelativeLinks()) ? DummyUri : ""; // fake base URI to allow relative URLs to remain valid
+        Document clean = Document.createShell(baseUri);
+        Document dirty = Document.createShell(baseUri);
         ParseErrorList errorList = ParseErrorList.tracking(1);
-        List<Node> nodes = Parser.parseFragment(bodyHtml, dirty.body(), "", errorList);
+        List<Node> nodes = Parser.parseFragment(bodyHtml, dirty.body(), baseUri, errorList);
         dirty.body().insertChildren(0, nodes);
         int numDiscarded = copySafeNodes(dirty.body(), clean.body());
         return numDiscarded == 0 && errorList.isEmpty();
@@ -136,7 +137,7 @@ public class Cleaner {
             this.destination = destination;
         }
 
-        public void head(Node source, int depth) {
+        @Override public void head(Node source, int depth) {
             if (source instanceof Element) {
                 Element sourceEl = (Element) source;
 
@@ -154,7 +155,7 @@ public class Cleaner {
                 TextNode sourceText = (TextNode) source;
                 TextNode destText = new TextNode(sourceText.getWholeText());
                 destination.appendChild(destText);
-            } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().nodeName())) {
+            } else if (source instanceof DataNode && safelist.isSafeTag(source.parent().normalName())) {
               DataNode sourceData = (DataNode) source;
               DataNode destData = new DataNode(sourceData.getWholeData());
               destination.appendChild(destData);
@@ -163,8 +164,8 @@ public class Cleaner {
             }
         }
 
-        public void tail(Node source, int depth) {
-            if (source instanceof Element && safelist.isSafeTag(source.nodeName())) {
+        @Override public void tail(Node source, int depth) {
+            if (source instanceof Element && safelist.isSafeTag(source.normalName())) {
                 destination = destination.parent(); // would have descended, so pop destination stack
             }
         }
@@ -177,11 +178,12 @@ public class Cleaner {
     }
 
     private ElementMeta createSafeElement(Element sourceEl) {
+        Element dest = sourceEl.shallowClone(); // reuses tag, clones attributes and preserves any user data
         String sourceTag = sourceEl.tagName();
-        Attributes destAttrs = new Attributes();
-        Element dest = new Element(Tag.valueOf(sourceTag), sourceEl.baseUri(), destAttrs);
-        int numDiscarded = 0;
+        Attributes destAttrs = dest.attributes();
+        dest.clearAttributes(); // clear all non-internal attributes, ready for safe copy
 
+        int numDiscarded = 0;
         Attributes sourceAttrs = sourceEl.attributes();
         for (Attribute sourceAttr : sourceAttrs) {
             if (safelist.isSafeAttribute(sourceTag, sourceEl, sourceAttr))
@@ -189,16 +191,20 @@ public class Cleaner {
             else
                 numDiscarded++;
         }
+
+
         Attributes enforcedAttrs = safelist.getEnforcedAttributes(sourceTag);
+        // special case for <a href rel=nofollow>, only apply to external links:
+        if (sourceEl.nameIs("a") && enforcedAttrs.get("rel").equals("nofollow")) {
+            String href = sourceEl.absUrl("href");
+            String sourceBase = sourceEl.baseUri();
+            if (!href.isEmpty() && !sourceBase.isEmpty() && href.startsWith(sourceBase)) { // same site, so don't set the nofollow
+                enforcedAttrs.remove("rel");
+            }
+        }
+
         destAttrs.addAll(enforcedAttrs);
-
-        // Copy the original start and end range, if set
-        // TODO - might be good to make a generic Element#userData set type interface, and copy those all over
-        if (sourceEl.sourceRange().isTracked())
-            sourceEl.sourceRange().track(dest, true);
-        if (sourceEl.endSourceRange().isTracked())
-            sourceEl.endSourceRange().track(dest, false);
-
+        dest.attributes().addAll(destAttrs); // re-attach, if removed in clear
         return new ElementMeta(dest, numDiscarded);
     }
 

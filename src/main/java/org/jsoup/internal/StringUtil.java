@@ -1,15 +1,16 @@
 package org.jsoup.internal;
 
 import org.jsoup.helper.Validate;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
-import java.util.Stack;
 import java.util.regex.Pattern;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
 
 /**
  A minimal String utility class. Designed for <b>internal</b> jsoup use only - the API and outcome may change without
@@ -281,7 +282,7 @@ public final class StringUtil {
         return true;
     }
 
-    private static final Pattern extraDotSegmentsPattern = Pattern.compile("^/((\\.{1,2}/)+)");
+    private static final Pattern extraDotSegmentsPattern = Pattern.compile("^/(?>(?>\\.\\.?/)+)");
     /**
      * Create a new absolute URL, from a provided existing absolute URL and a relative URL component.
      * @param base the existing absolute base URL
@@ -335,7 +336,10 @@ public final class StringUtil {
         return controlChars.matcher(input).replaceAll("");
     }
 
-    private static final ThreadLocal<Stack<StringBuilder>> threadLocalBuilders = ThreadLocal.withInitial(Stack::new);
+    private static final int InitBuilderSize = 1024;
+    private static final int MaxBuilderSize = 8 * 1024;
+    private static final SoftPool<StringBuilder> BuilderPool = new SoftPool<>(
+        () -> new StringBuilder(InitBuilderSize));
 
     /**
      * Maintains cached StringBuilders in a flyweight pattern, to minimize new StringBuilder GCs. The StringBuilder is
@@ -345,10 +349,7 @@ public final class StringUtil {
      * @return an empty StringBuilder
      */
     public static StringBuilder borrowBuilder() {
-        Stack<StringBuilder> builders = threadLocalBuilders.get();
-        return builders.empty() ?
-            new StringBuilder(MaxCachedBuilderSize) :
-            builders.pop();
+        return BuilderPool.borrow();
     }
 
     /**
@@ -361,20 +362,30 @@ public final class StringUtil {
         Validate.notNull(sb);
         String string = sb.toString();
 
-        if (sb.length() > MaxCachedBuilderSize)
-            sb = new StringBuilder(MaxCachedBuilderSize); // make sure it hasn't grown too big
-        else
+        // if it hasn't grown too big, reset it and return it to the pool:
+        if (sb.length() <= MaxBuilderSize) {
             sb.delete(0, sb.length()); // make sure it's emptied on release
-
-        Stack<StringBuilder> builders = threadLocalBuilders.get();
-        builders.push(sb);
-
-        while (builders.size() > MaxIdleBuilders) {
-            builders.pop();
+            BuilderPool.release(sb);
         }
+
         return string;
     }
 
-    private static final int MaxCachedBuilderSize = 8 * 1024;
-    private static final int MaxIdleBuilders = 8;
+    /**
+     * Return a {@link Collector} similar to the one returned by {@link Collectors#joining(CharSequence)},
+     * but backed by jsoup's {@link StringJoiner}, which allows for more efficient garbage collection.
+     *
+     * @param delimiter The delimiter for separating the strings.
+     * @return A {@code Collector} which concatenates CharSequence elements, separated by the specified delimiter
+     */
+    public static Collector<CharSequence, ?, String> joining(String delimiter) {
+        return Collector.of(() -> new StringJoiner(delimiter),
+            StringJoiner::add,
+            (j1, j2) -> {
+                j1.append(j2.complete());
+                return j1;
+            },
+            StringJoiner::complete);
+    }
+
 }

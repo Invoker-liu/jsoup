@@ -2,7 +2,6 @@ package org.jsoup.parser;
 
 import org.jsoup.Jsoup;
 import org.jsoup.TextUtil;
-import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.*;
 import org.jsoup.select.Elements;
 import org.junit.jupiter.api.Disabled;
@@ -127,7 +126,7 @@ public class XmlTreeBuilderTest {
     public void testDoesHandleEOFInTag() {
         String html = "<img src=asdf onerror=\"alert(1)\" x=";
         Document xmlDoc = Jsoup.parse(html, "", Parser.xmlParser());
-        assertEquals("<img src=\"asdf\" onerror=\"alert(1)\" x=\"\" />", xmlDoc.html());
+        assertEquals("<img src=\"asdf\" onerror=\"alert(1)\" x=\"\"></img>", xmlDoc.html());
     }
 
     @Test
@@ -296,7 +295,16 @@ public class XmlTreeBuilderTest {
         assertEquals(Syntax.xml, doc.outputSettings().syntax());
 
         String out = doc.html();
-        assertEquals("<body style=\"color: red\" name=\"\"><div></div></body>", out);
+        assertEquals("<body style=\"color: red\" _=\"\" name_=\"\"><div _=\"\"></div></body>", out);
+    }
+
+    @Test void xmlValidAttributes() {
+        String xml = "<a bB1-_:.=foo _9!=bar xmlns:p1=qux>One</a>";
+        Document doc = Jsoup.parse(xml, Parser.xmlParser());
+        assertEquals(Syntax.xml, doc.outputSettings().syntax());
+
+        String out = doc.html();
+        assertEquals("<a bB1-_:.=\"foo\" _9_=\"bar\" xmlns:p1=\"qux\">One</a>", out); // first is same, second coerced
     }
 
     @Test void customTagsAreFlyweights() {
@@ -312,6 +320,78 @@ public class XmlTreeBuilderTest {
         assertEquals("FOO", t3.getName());
         assertSame(t1, t2);
         assertSame(t3, t4);
-
     }
+
+    @Test void rootHasXmlSettings() {
+        Document doc = Jsoup.parse("<foo>", Parser.xmlParser());
+        ParseSettings settings = doc.parser().settings();
+        assertTrue(settings.preserveTagCase());
+        assertTrue(settings.preserveAttributeCase());
+        assertEquals(Parser.NamespaceXml, doc.parser().defaultNamespace());
+    }
+
+    @Test void xmlNamespace() {
+        String xml = "<foo><bar><div><svg><math>Qux</bar></foo>";
+        Document doc = Jsoup.parse(xml, Parser.xmlParser());
+
+        assertXmlNamespace(doc);
+        Elements els = doc.select("*");
+        for (Element el : els) {
+            assertXmlNamespace(el);
+        }
+
+        Document clone = doc.clone();
+        assertXmlNamespace(clone);
+        assertXmlNamespace(clone.expectFirst("bar"));
+
+        Document shallow = doc.shallowClone();
+        assertXmlNamespace(shallow);
+    }
+
+    private static void assertXmlNamespace(Element el) {
+        assertEquals(Parser.NamespaceXml, el.tag().namespace(), String.format("Element %s not in XML namespace", el.tagName()));
+    }
+
+    @Test void declarations() {
+        String xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><!DOCTYPE html\n" +
+            "  PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\"\n" +
+            "  \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">" +
+            "<!ELEMENT footnote (#PCDATA|a)*>";
+        Document doc = Jsoup.parse(xml, Parser.xmlParser());
+
+        XmlDeclaration proc = (XmlDeclaration) doc.childNode(0);
+        DocumentType doctype = (DocumentType) doc.childNode(1);
+        XmlDeclaration decl = (XmlDeclaration) doc.childNode(2);
+
+        assertEquals("xml", proc.name());
+        assertEquals("1.0", proc.attr("version"));
+        assertEquals("utf-8", proc.attr("encoding"));
+        assertEquals("version=\"1.0\" encoding=\"utf-8\"", proc.getWholeDeclaration());
+        assertEquals("<?xml version=\"1.0\" encoding=\"utf-8\"?>", proc.outerHtml());
+
+        assertEquals("html", doctype.name());
+        assertEquals("-//W3C//DTD XHTML 1.0 Transitional//EN", doctype.attr("publicId"));
+        assertEquals("http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd", doctype.attr("systemId"));
+        assertEquals("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">", doctype.outerHtml());
+
+        assertEquals("ELEMENT", decl.name());
+        assertEquals("footnote (#PCDATA|a)*", decl.getWholeDeclaration());
+        assertTrue(decl.hasAttr("footNote"));
+        assertFalse(decl.hasAttr("ELEMENT"));
+        assertEquals("<!ELEMENT footnote (#PCDATA|a)*>", decl.outerHtml());
+
+        assertEquals("<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">" +
+            "<!ELEMENT footnote (#PCDATA|a)*>", doc.outerHtml());
+    }
+
+    @Test void declarationWithGt() {
+        // https://github.com/jhy/jsoup/issues/1947
+        String xml = "<x><?xmlDeclaration att1=\"value1\" att2=\"&lt;val2>\"?></x>";
+        Document doc = Jsoup.parse(xml, Parser.xmlParser());
+        assertEquals(xml, doc.html());
+        XmlDeclaration decl = (XmlDeclaration) doc.expectFirst("x").childNode(0);
+        assertEquals("<val2>", decl.attr("att2"));
+    }
+
 }

@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -79,13 +80,13 @@ public class HtmlParserTest {
 
     @Test public void parsesQuiteRoughAttributes() {
         String html = "<p =a>One<a <p>Something</p>Else";
-        // this (used to; now gets cleaner) gets a <p> with attr '=a' and an <a tag with an attribute named '<p'; and then auto-recreated
+        // this gets a <p> with attr '=a' and an <a tag with an attribute named '<p'; and then auto-recreated
         Document doc = Jsoup.parse(html);
 
-        // NOTE: per spec this should be the test case. but impacts too many ppl
-        // assertEquals("<p =a>One<a <p>Something</a></p>\n<a <p>Else</a>", doc.body().html());
-
-        assertEquals("<p a>One<a></a></p><p><a>Something</a></p><a>Else</a>", TextUtil.stripNewlines(doc.body().html()));
+        // =a is output as _a
+        assertEquals("<p _a>One<a <p>Something</a></p><a <p>Else</a>", TextUtil.stripNewlines(doc.body().html()));
+        Element p = doc.expectFirst("p");
+        assertNotNull(p.attribute("=a"));
 
         doc = Jsoup.parse("<p .....>");
         assertEquals("<p .....></p>", doc.body().html());
@@ -368,7 +369,7 @@ public class HtmlParserTest {
 
     @Test public void handlesCdataAcrossBuffer() {
         StringBuilder sb = new StringBuilder();
-        while (sb.length() <= CharacterReader.maxBufferLen) {
+        while (sb.length() <= CharacterReader.BufferSize) {
             sb.append("A suitable amount of CData.\n");
         }
         String cdata = sb.toString();
@@ -459,10 +460,7 @@ public class HtmlParserTest {
 
     @Test public void parseBodyIsIndexNoAttributes() {
         // https://github.com/jhy/jsoup/issues/1404
-        String expectedHtml = "<form>\n" +
-            " <hr><label>This is a searchable index. Enter search keywords: <input name=\"isindex\"></label>\n" +
-            " <hr>\n" +
-            "</form>";
+        String expectedHtml = "<isindex></isindex>";
         Document doc = Jsoup.parse("<isindex>");
         assertEquals(expectedHtml, doc.body().html());
 
@@ -675,8 +673,10 @@ public class HtmlParserTest {
     }
 
     @Test public void handlesMisnestedAInDivs() {
-        String h = "<a href='#1'><div><div><a href='#2'>child</a></div</div></a>";
-        String w = "<a href=\"#1\"></a> <div> <a href=\"#1\"></a> <div> <a href=\"#1\"></a><a href=\"#2\">child</a> </div> </div>";
+        String h = "<a 1><div 2><div 3><a 4>child</a></div></div></a>";
+        String w = "<a 1></a> <div 2> <a 1=\"\"></a> <div 3> <a 1=\"\"></a><a 4>child</a> </div> </div>"; // chrome checked
+        // todo - come back to how we copy the attributes, to keep boolean setting (not ="")
+
         Document doc = Jsoup.parse(h);
         assertEquals(
             StringUtil.normaliseWhitespace(w),
@@ -851,7 +851,7 @@ public class HtmlParserTest {
     }
 
     @Test public void tracksErrorsWhenRequested() {
-        String html = "<p>One</p href='no'>\n<!DOCTYPE html>\n&arrgh;<font />&#33 &amp &#xD800;<br /></div><foo";
+        String html = "<p>One</p href='no'>\n<!DOCTYPE html>\n&arrgh;<font />&#33 &amp &#x110000;<br /></div><foo";
         Parser parser = Parser.htmlParser().setTrackErrors(500);
         Document doc = Jsoup.parse(html, "http://example.com", parser);
 
@@ -863,9 +863,9 @@ public class HtmlParserTest {
         assertEquals("<3:16>: Tag [font] cannot be self closing; not a void tag", errors.get(3).toString());
         assertEquals("<3:20>: Invalid character reference: missing semicolon on [&#33]", errors.get(4).toString());
         assertEquals("<3:25>: Invalid character reference: missing semicolon on [&amp]", errors.get(5).toString());
-        assertEquals("<3:34>: Invalid character reference: character [55296] outside of valid range", errors.get(6).toString());
-        assertEquals("<3:46>: Unexpected EndTag token [</div>] when in state [InBody]", errors.get(7).toString());
-        assertEquals("<3:51>: Unexpectedly reached end of file (EOF) in input state [TagName]", errors.get(8).toString());
+        assertEquals("<3:36>: Invalid character reference: character [1114112] outside of valid range", errors.get(6).toString());
+        assertEquals("<3:48>: Unexpected EndTag token [</div>] when in state [InBody]", errors.get(7).toString());
+        assertEquals("<3:53>: Unexpectedly reached end of file (EOF) in input state [TagName]", errors.get(8).toString());
     }
 
     @Test public void tracksLimitedErrorsWhenRequested() {
@@ -925,9 +925,8 @@ public class HtmlParserTest {
         assertEquals("<html> <head></head> <body> <ol> <li>One</li> </ol> <p>Two</p> </body> </html>", StringUtil.normaliseWhitespace(nodes.get(0).outerHtml()));
     }
 
-    @Test public void doesNotFindShortestMatchingEntity() {
-        // previous behaviour was to identify a possible entity, then chomp down the string until a match was found.
-        // (as defined in html5.) However in practise that lead to spurious matches against the author's intent.
+    @Test public void doesNotFindExtendedPrefixMatchingEntity() {
+        // only base entities, not extended entities, should allow prefix match (i.e., those in the spec named list that don't include a trailing ; - https://html.spec.whatwg.org/multipage/named-characters.html)
         String html = "One &clubsuite; &clubsuit;";
         Document doc = Jsoup.parse(html);
         assertEquals(StringUtil.normaliseWhitespace("One &amp;clubsuite; ♣"), doc.body().html());
@@ -939,6 +938,23 @@ public class HtmlParserTest {
         Document doc = Jsoup.parse(html);
         doc.outputSettings().escapeMode(Entities.EscapeMode.extended).charset("ascii"); // modifies output only to clarify test
         assertEquals("&amp; \" &reg; &amp;icy &amp;hopf &icy; &hopf;", doc.body().html());
+    }
+
+    @Test public void findsBasePrefixEntity() {
+        // https://github.com/jhy/jsoup/issues/2207
+        String html = "a&nbspc&shyc I'm &notit; I tell you. I'm &notin; I tell you.";
+        Document doc = Jsoup.parse(html);
+        doc.outputSettings().escapeMode(Entities.EscapeMode.extended).charset("ascii");
+        assertEquals("a&nbsp;c&shy;c I'm &not;it; I tell you. I'm &notin; I tell you.", doc.body().html());
+        assertEquals("a cc I'm ¬it; I tell you. I'm ∉ I tell you.", doc.body().text());
+
+        // and in an attribute:
+        html = "<a title=\"&nbspc&shyc I'm &notit; I tell you. I'm &notin; I tell you.\">One</a>";
+        doc = Jsoup.parse(html);
+        doc.outputSettings().escapeMode(Entities.EscapeMode.extended).charset("ascii");
+        Element el = doc.expectFirst("a");
+        assertEquals("<a title=\"&amp;nbspc&amp;shyc I'm &amp;notit; I tell you. I'm &notin; I tell you.\">One</a>", el.outerHtml());
+        assertEquals("&nbspc&shyc I'm &notit; I tell you. I'm ∉ I tell you.", el.attr("title"));
     }
 
     @Test public void handlesXmlDeclarationAsBogusComment() {
@@ -1051,8 +1067,8 @@ public class HtmlParserTest {
 
     @Test public void testNormalisesIsIndex() {
         Document doc = Jsoup.parse("<body><isindex action='/submit'></body>");
-        String html = doc.outerHtml();
-        assertEquals("<form action=\"/submit\"> <hr><label>This is a searchable index. Enter search keywords: <input name=\"isindex\"></label> <hr> </form>",
+        // There used to be rules so this became: <form action="/submit"> <hr><label>This is a searchable index. Enter search keywords: <input name="isindex"></label> <hr> </form>
+        assertEquals("<isindex action=\"/submit\"></isindex>",
             StringUtil.normaliseWhitespace(doc.body().html()));
     }
 
@@ -1495,6 +1511,13 @@ public class HtmlParserTest {
         assertEquals("<a> <b> </b></a><b><div><a> </a><a>test</a></div></b>", TextUtil.stripNewlines(doc.body().html()));
     }
 
+    @Test public void adoption() throws IOException {
+        // https://github.com/jhy/jsoup/issues/2267
+        File input = ParseTest.getFile("/htmltests/adopt-1.html");
+        Document doc = Jsoup.parse(input);
+        assertEquals("TEXT-AAA TEXT-BBB TEXT-CCC TEXT-DDD", doc.text());
+    }
+
     @Test public void tagsMustStartWithAscii() {
         // https://github.com/jhy/jsoup/issues/1006
         String[] valid = {"a一", "a会员挂单金额5", "table(╯°□°)╯"};
@@ -1522,7 +1545,7 @@ public class HtmlParserTest {
         assertEquals(Document.OutputSettings.Syntax.html, doc.outputSettings().syntax());
 
         String out = doc.body().outerHtml();
-        assertEquals("<body style=\"color: red\" name>\n <div></div>\n</body>", out);
+        assertEquals("<body style=\"color: red\" _ name_>\n <div _></div>\n</body>", out);
     }
 
     @Test void templateInHead() {
@@ -1623,7 +1646,7 @@ public class HtmlParserTest {
         // https://github.com/jhy/jsoup/issues/1637 | https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=38987
         Document doc = Jsoup.parse("<template><isindex action>");
         assertNotNull(doc);
-        assertEquals("<template><form><hr><label>This is a searchable index. Enter search keywords: <input name=\"isindex\"></label><hr></form></template>",
+        assertEquals("<template><isindex action></isindex></template>",
             TextUtil.stripNewlines(doc.head().html()));
     }
 
@@ -1633,10 +1656,25 @@ public class HtmlParserTest {
         // when the Element is created, the name got normalized to "template" and so looked like there should be a
         // template on the stack during resetInsertionMode for the select.
         // The issue was that the normalization in Tag.valueOf did a trim which the Token.Tag did not
-        Document doc = Jsoup.parse("<template\u001E<select<input<");
+        Document doc = Jsoup.parse("<template\u001E><select><input>");
         assertNotNull(doc);
-        assertEquals("<template><select></select><input>&lt;</template>",
+        assertEquals("<template><select></select><input></template>",
             TextUtil.stripNewlines(doc.head().html()));
+    }
+
+    @Test void templateInLi() {
+        // https://github.com/jhy/jsoup/issues/2258
+        String html = "<ul><li>L1</li><li>L2 <template><li>T1</li><li>T2</template></li><li>L3</ul>";
+        Document doc = Jsoup.parse(html);
+        assertEquals("<ul><li>L1</li><li>L2 <template><li>T1</li><li>T2</li></template></li><li>L3</li></ul>",
+            TextUtil.stripNewlines(doc.body().html()));
+    }
+
+    @Test void templateInButton() {
+        // https://github.com/jhy/jsoup/issues/2271
+        String html = "<button><template><button></button></template></button>";
+        Document doc = Jsoup.parse(html);
+        assertEquals(html, TextUtil.stripNewlines(doc.body().html()));
     }
 
     @Test void errorsBeforeHtml() {
@@ -1751,5 +1789,208 @@ public class HtmlParserTest {
         Element textArea = doc.expectFirst("textarea");
 
         assertEquals(textContent, textArea.wholeText());
+    }
+
+    @Test void svgParseTest() {
+        String html = "<div><svg viewBox=2><foreignObject><p>One</p></foreignObject></svg></div>";
+        Document doc = Jsoup.parse(html);
+
+        assertHtmlNamespace(doc);
+        Element div = doc.expectFirst("div");
+        assertHtmlNamespace(div);
+
+        Element svg = doc.expectFirst("svg");
+        assertTrue(svg.attributes().hasKey("viewBox"));
+        assertSvgNamespace(svg);
+        assertSvgNamespace(doc.expectFirst("foreignObject"));
+        assertHtmlNamespace(doc.expectFirst("p"));
+
+        String serialized = div.html();
+        assertEquals("<svg viewBox=\"2\">\n" +
+            " <foreignObject>\n" +
+            "  <p>One</p>\n" +
+            " </foreignObject>\n" +
+            "</svg>", serialized);
+    }
+
+    @Test void mathParseText() {
+        String html = "<div><math><mi><p>One</p><svg><text>Blah</text></svg></mi><ms></ms></div>";
+        Document doc = Jsoup.parse(html);
+
+        assertHtmlNamespace(doc.expectFirst("div"));
+        assertMathNamespace(doc.expectFirst("math"));
+        assertMathNamespace(doc.expectFirst("mi"));
+        assertHtmlNamespace(doc.expectFirst("p"));
+        assertSvgNamespace(doc.expectFirst("svg"));
+        assertSvgNamespace(doc.expectFirst("text"));
+        assertMathNamespace(doc.expectFirst("ms"));
+
+        String serialized = doc.expectFirst("div").html();
+        assertEquals("<math>\n" +
+            " <mi>\n" +
+            "  <p>One</p>\n" +
+            "  <svg>\n" +
+            "   <text>Blah</text>\n" +
+            "  </svg></mi><ms></ms>\n" +
+            "</math>", serialized);
+    }
+
+    private static void assertHtmlNamespace(Element el) {
+        assertEquals(Parser.NamespaceHtml, el.tag().namespace());
+    }
+
+    private static void assertSvgNamespace(Element el) {
+        assertEquals(Parser.NamespaceSvg, el.tag().namespace());
+    }
+
+    private static void assertMathNamespace(Element el) {
+        assertEquals(Parser.NamespaceMathml, el.tag().namespace());
+    }
+
+    @Test void mathSvgStyleTest() {
+        String html = "<style><img></style><math><svg><style><img></img></style></svg></math>";
+        Document doc = Jsoup.parse(html);
+
+        Element htmlStyle = doc.expectFirst("style");
+        assertHtmlNamespace(htmlStyle);
+        assertEquals("<img>", htmlStyle.data()); // that's not an element, it's data (textish)
+
+        Element svgStyle = doc.expectFirst("svg style");
+        assertMathNamespace(svgStyle); // in inherited math namespace as not an HTML integration point
+        Element styleImg = svgStyle.expectFirst("img");
+        assertHtmlNamespace(styleImg); // this one is an img tag - in foreign to html elements
+
+        assertMathNamespace(doc.expectFirst("svg"));
+        assertMathNamespace(doc.expectFirst("math"));
+    }
+
+    @Test void xmlnsAttributeError() {
+        String html = "<p><svg></svg></body>";
+        Parser parser = Parser.htmlParser().setTrackErrors(10);
+        Document doc = Jsoup.parse(html, parser);
+        assertEquals(0, doc.parser().getErrors().size());
+
+        String html2 = "<html xmlns='http://www.w3.org/1999/xhtml'><p xmlns='http://www.w3.org/1999/xhtml'><i xmlns='xhtml'></i></body>";
+        Document doc2 = Jsoup.parse(html2, parser);
+        assertEquals(1, doc2.parser().getErrors().size());
+        assertEquals("Invalid xmlns attribute [xhtml] on tag [i]", parser.getErrors().get(0).getErrorMessage());
+    }
+
+    @Test void mathAnnotationSvg() {
+        String html = "<math><svg>"; // not in annotation, svg will be in math ns
+        Document doc = Jsoup.parse(html);
+        assertMathNamespace(doc.expectFirst("math"));
+        assertMathNamespace(doc.expectFirst("svg"));
+
+        String html2 = "<math><annotation-xml><svg>"; // svg will be in svg ns
+        Document doc2 = Jsoup.parse(html2);
+        assertMathNamespace(doc2.expectFirst("math"));
+        assertMathNamespace(doc2.expectFirst("annotation-xml"));
+        assertSvgNamespace(doc2.expectFirst("svg"));
+    }
+
+    @Test void mathHtmlIntegrationPoint() {
+        String html = "<math><div>Hello";
+        Document doc = Jsoup.parse(html);
+        assertMathNamespace(doc.expectFirst("math"));
+        assertHtmlNamespace(doc.expectFirst("div"));
+
+        String html2 = "<math><divv>Hello";
+        Document doc2 = Jsoup.parse(html2);
+        assertMathNamespace(doc2.expectFirst("math"));
+        assertMathNamespace(doc2.expectFirst("divv"));
+
+        String html3 = "<math><annotation-xml><divv>Hello";
+        Document doc3 = Jsoup.parse(html3);
+        assertMathNamespace(doc3.expectFirst("math"));
+        assertMathNamespace(doc3.expectFirst("annotation-xml"));
+        assertMathNamespace(doc3.expectFirst("divv"));
+
+        String html4 = "<math><annotation-xml encoding=text/html><divv>Hello";
+        Document doc4 = Jsoup.parse(html4);
+        assertMathNamespace(doc4.expectFirst("math"));
+        assertMathNamespace(doc4.expectFirst("annotation-xml"));
+        assertHtmlNamespace(doc4.expectFirst("divv"));
+    }
+
+    @Test void parseEmojiFromMultipointEncoded() {
+        String html = "<img multi='&#55357;&#56495;' single='&#128175;' hexsingle='&#x1f4af;'>";
+        Document document = Jsoup.parse(html);
+        Element img = document.expectFirst("img");
+        assertEquals("\uD83D\uDCAF", img.attr("multi"));
+        assertEquals("\uD83D\uDCAF", img.attr("single"));
+        assertEquals("\uD83D\uDCAF", img.attr("hexsingle"));
+
+        assertEquals("<img multi=\"\uD83D\uDCAF\" single=\"\uD83D\uDCAF\" hexsingle=\"\uD83D\uDCAF\">", img.outerHtml());
+
+        img.ownerDocument().outputSettings().charset("ascii");
+        assertEquals("<img multi=\"&#x1f4af;\" single=\"&#x1f4af;\" hexsingle=\"&#x1f4af;\">", img.outerHtml());
+    }
+
+    @Test void tableInPInQuirksMode() {
+        // https://github.com/jhy/jsoup/issues/2197
+        String html = "<p><span><table><tbody><tr><td><span>Hello table data</span></td></tr></tbody></table></span></p>";
+        Document doc = Jsoup.parse(html);
+        assertEquals(Document.QuirksMode.quirks, doc.quirksMode());
+        assertEquals(
+            "<p><span><table><tbody><tr><td><span>Hello table data</span></td></tr></tbody></table></span></p>", // quirks, allows table in p
+            TextUtil.normalizeSpaces(doc.body().html())
+        );
+
+        // doctype set, no quirks
+        html ="<!DOCTYPE html><p><span><table><tbody><tr><td><span>Hello table data</span></td></tr></tbody></table></span></p>";
+        doc = Jsoup.parse(html);
+        assertEquals(Document.QuirksMode.noQuirks, doc.quirksMode());
+        assertEquals(
+            "<p><span></span></p><table><tbody><tr><td><span>Hello table data</span></td></tr></tbody></table><p></p>", // no quirks, p gets closed
+            TextUtil.normalizeSpaces(doc.body().html())
+        );
+    }
+
+    @Test void gtAfterTagClose() {
+        // https://github.com/jhy/jsoup/issues/2230
+        String html = "<div>Div</div<> <a>One<a<b>Hello</b>";
+        // this gives us an element "a<b", which is gross, but to the spec & browsers
+        Document doc = Jsoup.parse(html);
+        Element body = doc.body();
+        assertEquals("<div> Div <a>One<a<b> Hello </a<b></a></div>", TextUtil.normalizeSpaces(body.html()));
+
+        Elements abs = doc.getElementsByTag("a<b");
+        assertEquals(1, abs.size());
+        Element ab = abs.first();
+        assertEquals("Hello", ab.text());
+        assertEquals("a<b", ab.tag().normalName());
+    }
+
+    @Test void ltInAttrStart() {
+        // https://github.com/jhy/jsoup/issues/1483
+        String html = "<a before='foo' <junk after='bar'>One</a>";
+        Document doc = Jsoup.parse(html);
+        assertEquals("<a before=\"foo\" <junk after=\"bar\">One</a>", TextUtil.normalizeSpaces(doc.body().html()));
+
+        Element el = doc.expectFirst("a");
+        Attribute attribute = el.attribute("<junk");
+        assertNotNull(attribute);
+        assertEquals("", attribute.getValue());
+    }
+
+    @Test void pseudoAttributeComment() {
+        // https://github.com/jhy/jsoup/issues/1938
+        String html = "  <h1>before</h1> <div <!--=\"\" id=\"hidden\" --=\"\"> <h1>within</h1> </div> <h1>after</h1>";
+        Document doc = Jsoup.parse(html);
+        assertEquals("<h1>before</h1><div <!--=\"\" id=\"hidden\" --=\"\"><h1>within</h1></div><h1>after</h1>", TextUtil.normalizeSpaces(doc.body().html()));
+        Element div = doc.expectFirst("div");
+        assertNotNull(div.attribute("<!--"));
+        assertEquals("hidden", div.attr("id"));
+        assertNotNull(div.attribute("--"));
+    }
+
+    @Test void nullStreamReturnsEmptyDoc() throws IOException {
+        // https://github.com/jhy/jsoup/issues/2252
+        InputStream stream = null;
+        Document doc = Jsoup.parse(stream, null, "");
+        // don't want to mark parse(stream) as @Nullable, as it's more useful to show the warning. But support it, for backwards compat
+        assertNotNull(doc);
+        assertEquals("", doc.title());
     }
 }

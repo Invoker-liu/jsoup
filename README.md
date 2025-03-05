@@ -1,8 +1,8 @@
 # jsoup: Java HTML Parser
 
-**jsoup** is a Java library for working with real-world HTML. It provides a very convenient API for fetching URLs and extracting and manipulating data, using the best of HTML5 DOM methods and CSS selectors.
+**jsoup** is a Java library that makes it easy to work with real-world HTML and XML. It offers an easy-to-use API for URL fetching, data parsing, extraction, and manipulation using DOM API methods, CSS, and xpath selectors.
 
-**jsoup** implements the [WHATWG HTML5](https://html.spec.whatwg.org/multipage/) specification, and parses HTML to the same DOM as modern browsers do.
+**jsoup** implements the [WHATWG HTML5](https://html.spec.whatwg.org/multipage/) specification, and parses HTML to the same DOM as modern browsers.
 
 * scrape and [parse](https://jsoup.org/cookbook/input/parse-document-from-string) HTML from a URL, file, or string
 * find and [extract data](https://jsoup.org/cookbook/extracting-data/selector-syntax), using DOM traversal or CSS selectors
@@ -39,10 +39,10 @@ jsoup is an open source project distributed under the liberal [MIT license](http
 3. Enjoy!
 
 ### Android support
-When used in Android projects, [core library desugaring](https://developer.android.com/studio/write/java8-support#library-desugaring) should be enabled to support Java 8+ features.
+When used in Android projects, [core library desugaring](https://developer.android.com/studio/write/java8-support#library-desugaring) with the [NIO specification](https://developer.android.com/studio/write/java11-nio-support-table) should be enabled to support Java 8+ features.
 
 ## Development and support
-If you have any questions on how to use jsoup, or have ideas for future development, please get in touch via the [mailing list](https://jsoup.org/discussion).
+If you have any questions on how to use jsoup, or have ideas for future development, please get in touch via [jsoup Discussions](https://github.com/jhy/jsoup/discussions).
 
 If you find any issues, please file a [bug](https://jsoup.org/bugs) after checking for duplicates.
 
@@ -50,3 +50,22 @@ The [colophon](https://jsoup.org/colophon) talks about the history of and tools 
 
 ## Status
 jsoup is in general, stable release.
+
+## Author
+jsoup was created and is maintained by [Jonathan Hedley](//jhedley.com), its primary author.
+
+jsoup is an open-source project, and many contributors have helped improve it over the years. You can see their contributions and join the development on [GitHub](https://github.com/jhy/jsoup/graphs/contributors).
+
+## Citing jsoup
+If you use jsoup in research or technical documentation, you can cite it as:
+
+> **Jonathan Hedley & jsoup contributors. jsoup: Java HTML Parser (2009–present).** Available at: https://jsoup.org
+
+```plaintext
+@misc{jsoup,
+  author = {Jonathan Hedley and jsoup contributors},
+  title = {jsoup: Java HTML Parser},
+  year = {2025},
+  url = {https://jsoup.org}
+}
+```

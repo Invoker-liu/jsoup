@@ -2,8 +2,8 @@ package org.jsoup.nodes;
 
 import org.jsoup.parser.ParseSettings;
 import org.jsoup.parser.Parser;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.io.IOException;
 
 /**
@@ -16,10 +16,10 @@ public class Comment extends LeafNode {
      @param data The contents of the comment
      */
     public Comment(String data) {
-        value = data;
+        super(data);
     }
 
-    public String nodeName() {
+    @Override public String nodeName() {
         return "#comment";
     }
 
@@ -50,18 +50,16 @@ public class Comment extends LeafNode {
     void outerHtmlTail(Appendable accum, int depth, Document.OutputSettings out) {}
 
     @Override
-    public String toString() {
-        return outerHtml();
-    }
-
-    @Override
     public Comment clone() {
         return (Comment) super.clone();
     }
 
     /**
-     * Check if this comment looks like an XML Declaration.
+     * Check if this comment looks like an XML Declaration. This is the case when the HTML parser sees an XML
+     * declaration or processing instruction. Other than doctypes, those aren't part of HTML, and will be parsed as a
+     * bogus comment.
      * @return true if it looks like, maybe, it's an XML Declaration.
+     * @see #asXmlDeclaration()
      */
     public boolean isXmlDeclaration() {
         String data = getData();
@@ -75,6 +73,7 @@ public class Comment extends LeafNode {
     /**
      * Attempt to cast this comment to an XML Declaration node.
      * @return an XML declaration if it could be parsed as one, null otherwise.
+     * @see #isXmlDeclaration()
      */
     public @Nullable XmlDeclaration asXmlDeclaration() {
         String data = getData();

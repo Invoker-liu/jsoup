@@ -1,7 +1,9 @@
 package org.jsoup.parser;
 
 import org.jsoup.helper.Validate;
+import org.jsoup.internal.Normalizer;
 import org.jsoup.internal.StringUtil;
+import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.CDataNode;
 import org.jsoup.nodes.Comment;
 import org.jsoup.nodes.DataNode;
@@ -10,38 +12,50 @@ import org.jsoup.nodes.Element;
 import org.jsoup.nodes.FormElement;
 import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
-import org.jsoup.parser.Token.StartTag;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
-import javax.annotation.ParametersAreNonnullByDefault;
 import java.io.Reader;
-import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.jsoup.internal.StringUtil.inSorted;
 import static org.jsoup.parser.HtmlTreeBuilderState.Constants.InTableFoster;
+import static org.jsoup.parser.HtmlTreeBuilderState.ForeignContent;
+import static org.jsoup.parser.Parser.*;
 
 /**
  * HTML Tree Builder; creates a DOM from Tokens.
  */
 public class HtmlTreeBuilder extends TreeBuilder {
     // tag searches. must be sorted, used in inSorted. HtmlTreeBuilderTest validates they're sorted.
-    static final String[] TagsSearchInScope = new String[]{"applet", "caption", "html", "marquee", "object", "table", "td", "th"};
+    static final String[] TagsSearchInScope = new String[]{ // a particular element in scope
+        "applet", "caption", "html", "marquee", "object", "table", "td", "template", "th"
+    };
+    // math and svg namespaces for particular element in scope
+    static final String[]TagSearchInScopeMath = new String[] {
+        "annotation-xml",  "mi", "mn", "mo", "ms", "mtext"
+    };
+    static final String[]TagSearchInScopeSvg = new String[] {
+        "desc", "foreignObject", "title"
+    };
+
     static final String[] TagSearchList = new String[]{"ol", "ul"};
     static final String[] TagSearchButton = new String[]{"button"};
     static final String[] TagSearchTableScope = new String[]{"html", "table"};
     static final String[] TagSearchSelectScope = new String[]{"optgroup", "option"};
     static final String[] TagSearchEndTags = new String[]{"dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"};
     static final String[] TagThoroughSearchEndTags = new String[]{"caption", "colgroup", "dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc", "tbody", "td", "tfoot", "th", "thead", "tr"};
-    static final String[] TagSearchSpecial = new String[]{"address", "applet", "area", "article", "aside", "base", "basefont", "bgsound",
-        "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "command", "dd",
-        "details", "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form",
-        "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html",
-        "iframe", "img", "input", "isindex", "li", "link", "listing", "marquee", "menu", "meta", "nav",
-        "noembed", "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script",
-        "section", "select", "style", "summary", "table", "tbody", "td", "textarea", "tfoot", "th", "thead",
-        "title", "tr", "ul", "wbr", "xmp"};
+    static final String[] TagSearchSpecial = new String[]{
+        "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body", "br",
+        "button", "caption", "center", "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed",
+        "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6",
+        "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link", "listing", "main",
+        "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol", "p", "param", "plaintext",
+        "pre", "script", "search", "section", "select", "source", "style", "summary", "table", "tbody", "td",
+        "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp"};
+    static String[] TagSearchSpecialMath = {"annotation-xml", "mi", "mn", "mo", "ms", "mtext"}; // differs to MathML text integration point; adds annotation-xml
+    static final String[] TagMathMlTextIntegration = new String[]{"mi", "mn", "mo", "ms", "mtext"};
+    static final String[] TagSvgHtmlIntegration = new String[]{"desc", "foreignObject", "title"};
 
     public static final int MaxScopeSearchDepth = 100; // prevents the parser bogging down in exceptionally broken pages
 
@@ -51,8 +65,8 @@ public class HtmlTreeBuilder extends TreeBuilder {
     private boolean baseUriSetFromDoc;
     private @Nullable Element headElement; // the current head element
     private @Nullable FormElement formElement; // the current form element
-    private @Nullable Element contextElement; // fragment parse context -- could be null even if fragment parsing
-    private ArrayList<Element> formattingElements; // active (open) formatting elements
+    private @Nullable Element contextElement; // fragment parse root; name only copy of context. could be null even if fragment parsing
+    ArrayList<Element> formattingElements; // active (open) formatting elements
     private ArrayList<HtmlTreeBuilderState> tmplInsertMode; // stack of Template Insertion modes
     private List<Token.Character> pendingTableCharacters; // chars in table to be shifted out
     private Token.EndTag emptyEnd; // reused empty end tag
@@ -61,7 +75,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
     private boolean fosterInserts; // if next inserts should be fostered
     private boolean fragmentParsing; // if parsing a fragment of html
 
-    ParseSettings defaultSettings() {
+    @Override ParseSettings defaultSettings() {
         return ParseSettings.htmlDefault;
     }
 
@@ -70,7 +84,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
         return new HtmlTreeBuilder();
     }
 
-    @Override @ParametersAreNonnullByDefault
+    @Override
     protected void initialiseParse(Reader input, String baseUri, Parser parser) {
         super.initialiseParse(input, baseUri, parser);
 
@@ -84,27 +98,25 @@ public class HtmlTreeBuilder extends TreeBuilder {
         formattingElements = new ArrayList<>();
         tmplInsertMode = new ArrayList<>();
         pendingTableCharacters = new ArrayList<>();
-        emptyEnd = new Token.EndTag();
+        emptyEnd = new Token.EndTag(this);
         framesetOk = true;
         fosterInserts = false;
         fragmentParsing = false;
     }
 
-    List<Node> parseFragment(String inputFragment, @Nullable Element context, String baseUri, Parser parser) {
+    @Override void initialiseParseFragment(@Nullable Element context) {
         // context may be null
         state = HtmlTreeBuilderState.Initial;
-        initialiseParse(new StringReader(inputFragment), baseUri, parser);
-        contextElement = context;
         fragmentParsing = true;
-        Element root = null;
 
         if (context != null) {
+            final String contextName = context.normalName();
+            contextElement = new Element(tagFor(contextName, contextName, defaultNamespace(), settings), baseUri);
             if (context.ownerDocument() != null) // quirks setup:
                 doc.quirksMode(context.ownerDocument().quirksMode());
 
             // initialise the tokeniser state:
-            String contextTag = context.normalName();
-            switch (contextTag) {
+            switch (contextName) {
                 case "title":
                 case "textarea":
                     tokeniser.transition(TokeniserState.Rcdata);
@@ -113,14 +125,11 @@ public class HtmlTreeBuilder extends TreeBuilder {
                 case "noembed":
                 case "noframes":
                 case "style":
-                case "xml":
+                case "xmp":
                     tokeniser.transition(TokeniserState.Rawtext);
                     break;
                 case "script":
                     tokeniser.transition(TokeniserState.ScriptData);
-                    break;
-                case "noscript":
-                    tokeniser.transition(TokeniserState.Data); // if scripting enabled, rawtext
                     break;
                 case "plaintext":
                     tokeniser.transition(TokeniserState.PLAINTEXT);
@@ -132,9 +141,8 @@ public class HtmlTreeBuilder extends TreeBuilder {
                 default:
                     tokeniser.transition(TokeniserState.Data);
             }
-            root = new Element(tagFor(contextTag, settings), baseUri);
-            doc.appendChild(root);
-            stack.add(root);
+            doc.appendChild(contextElement);
+            push(contextElement);
             resetInsertionMode();
 
             // setup form element to nearest form on context (up ancestor chain). ensures form controls are associated
@@ -148,15 +156,16 @@ public class HtmlTreeBuilder extends TreeBuilder {
                 formSearch = formSearch.parent();
             }
         }
+    }
 
-        runParser();
-        if (context != null) {
+    @Override List<Node> completeParseFragment() {
+        if (contextElement != null) {
             // depending on context and the input html, content may have been added outside of the root el
             // e.g. context=p, input=div, the div will have been pushed out.
-            List<Node> nodes = root.siblingNodes();
+            List<Node> nodes = contextElement.siblingNodes();
             if (!nodes.isEmpty())
-                root.insertChildren(-1, nodes);
-            return root.childNodes();
+                contextElement.insertChildren(-1, nodes);
+            return contextElement.childNodes();
         }
         else
             return doc.childNodes();
@@ -164,12 +173,82 @@ public class HtmlTreeBuilder extends TreeBuilder {
 
     @Override
     protected boolean process(Token token) {
-        currentToken = token;
-        return this.state.process(token, this);
+        HtmlTreeBuilderState dispatch = useCurrentOrForeignInsert(token) ? this.state : ForeignContent;
+        return dispatch.process(token, this);
+    }
+
+    boolean useCurrentOrForeignInsert(Token token) {
+        // https://html.spec.whatwg.org/multipage/parsing.html#tree-construction
+        // If the stack of open elements is empty
+        if (stack.isEmpty())
+            return true;
+        final Element el = currentElement();
+        final String ns = el.tag().namespace();
+
+        // If the adjusted current node is an element in the HTML namespace
+        if (NamespaceHtml.equals(ns))
+            return true;
+
+        // If the adjusted current node is a MathML text integration point and the token is a start tag whose tag name is neither "mglyph" nor "malignmark"
+        // If the adjusted current node is a MathML text integration point and the token is a character token
+        if (isMathmlTextIntegration(el)) {
+            if (token.isStartTag()
+                    && !"mglyph".equals(token.asStartTag().normalName)
+                    && !"malignmark".equals(token.asStartTag().normalName))
+                    return true;
+            if (token.isCharacter())
+                    return true;
+        }
+        // If the adjusted current node is a MathML annotation-xml element and the token is a start tag whose tag name is "svg"
+        if (Parser.NamespaceMathml.equals(ns)
+            && el.nameIs("annotation-xml")
+            && token.isStartTag()
+            && "svg".equals(token.asStartTag().normalName))
+            return true;
+
+        // If the adjusted current node is an HTML integration point and the token is a start tag
+        // If the adjusted current node is an HTML integration point and the token is a character token
+        if (isHtmlIntegration(el)
+            && (token.isStartTag() || token.isCharacter()))
+            return true;
+
+        // If the token is an end-of-file token
+        return token.isEOF();
+    }
+
+    static boolean isMathmlTextIntegration(Element el) {
+        /*
+        A node is a MathML text integration point if it is one of the following elements:
+        A MathML mi element
+        A MathML mo element
+        A MathML mn element
+        A MathML ms element
+        A MathML mtext element
+         */
+        return (Parser.NamespaceMathml.equals(el.tag().namespace())
+            && StringUtil.inSorted(el.normalName(), TagMathMlTextIntegration));
+    }
+
+    static boolean isHtmlIntegration(Element el) {
+        /*
+        A node is an HTML integration point if it is one of the following elements:
+        A MathML annotation-xml element whose start tag token had an attribute with the name "encoding" whose value was an ASCII case-insensitive match for the string "text/html"
+        A MathML annotation-xml element whose start tag token had an attribute with the name "encoding" whose value was an ASCII case-insensitive match for the string "application/xhtml+xml"
+        An SVG foreignObject element
+        An SVG desc element
+        An SVG title element
+         */
+        if (Parser.NamespaceMathml.equals(el.tag().namespace())
+            && el.nameIs("annotation-xml")) {
+            String encoding = Normalizer.normalize(el.attr("encoding"));
+            if (encoding.equals("text/html") || encoding.equals("application/xhtml+xml"))
+                return true;
+        }
+        // note using .tagName for case-sensitive hit here of foreignObject
+        return Parser.NamespaceSvg.equals(el.tag().namespace()) && StringUtil.in(el.tagName(), TagSvgHtmlIntegration);
     }
 
     boolean process(Token token, HtmlTreeBuilderState state) {
-        currentToken = token;
         return state.process(token, this);
     }
 
@@ -227,86 +306,122 @@ public class HtmlTreeBuilder extends TreeBuilder {
                 currentToken.tokenType(), currentToken, state));
     }
 
-    Element insert(final Token.StartTag startTag) {
-        dedupeAttributes(startTag);
-
-        // handle empty unknown tags
-        // when the spec expects an empty tag, will directly hit insertEmpty, so won't generate this fake end tag.
-        if (startTag.isSelfClosing()) {
-            Element el = insertEmpty(startTag);
-            stack.add(el);
-            tokeniser.transition(TokeniserState.Data); // handles <script />, otherwise needs breakout steps from script data
-            tokeniser.emit(emptyEnd.reset().name(el.tagName()));  // ensure we get out of whatever state we are in. emitted for yielded processing
-            return el;
+    Element createElementFor(Token.StartTag startTag, String namespace, boolean forcePreserveCase) {
+        // dedupe and normalize the attributes:
+        Attributes attributes = startTag.attributes;
+        if (!forcePreserveCase)
+            attributes = settings.normalizeAttributes(attributes);
+        if (attributes != null && !attributes.isEmpty()) {
+            int dupes = attributes.deduplicate(settings);
+            if (dupes > 0) {
+                error("Dropped duplicate attribute(s) in tag [%s]", startTag.normalName);
+            }
         }
 
-        Element el = new Element(tagFor(startTag.name(), settings), null, settings.normalizeAttributes(startTag.attributes));
-        insert(el, startTag);
-        return el;
+        Tag tag = tagFor(startTag.tagName, startTag.normalName, namespace,
+            forcePreserveCase ? ParseSettings.preserveCase : settings);
+
+        return (tag.normalName().equals("form")) ?
+            new FormElement(tag, null, attributes) :
+            new Element(tag, null, attributes);
     }
 
-	Element insertStartTag(String startTagName) {
-        Element el = new Element(tagFor(startTagName, settings), null);
-        insert(el);
-        return el;
-    }
+    /** Inserts an HTML element for the given tag) */
+    Element insertElementFor(final Token.StartTag startTag) {
+        Element el = createElementFor(startTag, NamespaceHtml, false);
+        doInsertElement(el, startTag);
 
-    void insert(Element el) {
-        insertNode(el, null);
-        stack.add(el);
-    }
-
-    private void insert(Element el, @Nullable Token token) {
-        insertNode(el, token);
-        stack.add(el);
-    }
-
-    Element insertEmpty(Token.StartTag startTag) {
-        dedupeAttributes(startTag);
-
-        Tag tag = tagFor(startTag.name(), settings);
-        Element el = new Element(tag, null, settings.normalizeAttributes(startTag.attributes));
-        insertNode(el, startTag);
+        // handle self-closing tags. when the spec expects an empty tag, will directly hit insertEmpty, so won't generate this fake end tag.
         if (startTag.isSelfClosing()) {
+            Tag tag = el.tag();
             if (tag.isKnownTag()) {
                 if (!tag.isEmpty())
                     tokeniser.error("Tag [%s] cannot be self closing; not a void tag", tag.normalName());
+                // else: ok
             }
-            else // unknown tag, remember this is self closing for output
+            else { // unknown tag: remember this is self-closing, for output
                 tag.setSelfClosing();
+            }
+
+            // effectively a pop, but fiddles with the state. handles empty style, title etc which would otherwise leave us in data state
+            tokeniser.transition(TokeniserState.Data); // handles <script />, otherwise needs breakout steps from script data
+            tokeniser.emit(emptyEnd.reset().name(el.tagName()));  // ensure we get out of whatever state we are in. emitted for yielded processing
         }
+
         return el;
     }
 
-    FormElement insertForm(Token.StartTag startTag, boolean onStack, boolean checkTemplateStack) {
-        dedupeAttributes(startTag);
+    /**
+     Inserts a foreign element. Preserves the case of the tag name and of the attributes.
+     */
+    Element insertForeignElementFor(final Token.StartTag startTag, String namespace) {
+        Element el = createElementFor(startTag, namespace, true);
+        doInsertElement(el, startTag);
 
-        Tag tag = tagFor(startTag.name(), settings);
-        FormElement el = new FormElement(tag, null, settings.normalizeAttributes(startTag.attributes));
+        if (startTag.isSelfClosing()) {
+            el.tag().setSelfClosing(); // remember this is self-closing for output
+            pop();
+        }
+
+        return el;
+    }
+
+    Element insertEmptyElementFor(Token.StartTag startTag) {
+        Element el = createElementFor(startTag, NamespaceHtml, false);
+        doInsertElement(el, startTag);
+        pop();
+        return el;
+    }
+
+    FormElement insertFormElement(Token.StartTag startTag, boolean onStack, boolean checkTemplateStack) {
+        FormElement el = (FormElement) createElementFor(startTag, NamespaceHtml, false);
+
         if (checkTemplateStack) {
             if(!onStack("template"))
                 setFormElement(el);
         } else
             setFormElement(el);
 
-        insertNode(el, startTag);
-        if (onStack)
-            stack.add(el);
+        doInsertElement(el, startTag);
+        if (!onStack) pop();
         return el;
     }
 
-    void insert(Token.Comment commentToken) {
-        Comment comment = new Comment(commentToken.getData());
-        insertNode(comment, commentToken);
+    /** Inserts the Element onto the stack. All element inserts must run through this method. Performs any general
+     tests on the Element before insertion.
+     * @param el the Element to insert and make the current element
+     * @param token the token this element was parsed from. If null, uses a zero-width current token as intrinsic insert
+     */
+    private void doInsertElement(Element el, @Nullable Token token) {
+        if (el.tag().isFormListed() && formElement != null)
+            formElement.addElement(el); // connect form controls to their form element
+
+        // in HTML, the xmlns attribute if set must match what the parser set the tag's namespace to
+        if (parser.getErrors().canAddError() && el.hasAttr("xmlns") && !el.attr("xmlns").equals(el.tag().namespace()))
+            error("Invalid xmlns attribute [%s] on tag [%s]", el.attr("xmlns"), el.tagName());
+
+        if (isFosterInserts() && StringUtil.inSorted(currentElement().normalName(), InTableFoster))
+            insertInFosterParent(el);
+        else
+            currentElement().appendChild(el);
+
+        push(el);
+    }
+
+    void insertCommentNode(Token.Comment token) {
+        Comment node = new Comment(token.getData());
+        currentElement().appendChild(node);
+        onNodeInserted(node);
     }
 
     /** Inserts the provided character token into the current element. */
-    void insert(Token.Character characterToken) {
-        final Element el = currentElement(); // will be doc if no current element; allows for whitespace to be inserted into the doc root object (not on the stack)
-        insert(characterToken, el);
+    void insertCharacterNode(Token.Character characterToken) {
+        Element el = currentElement(); // will be doc if no current element; allows for whitespace to be inserted into the doc root object (not on the stack)
+        insertCharacterToElement(characterToken, el);
     }
 
-    void insert(Token.Character characterToken, Element el) {
+    /** Inserts the provided character token into the provided element. */
+    void insertCharacterToElement(Token.Character characterToken, Element el) {
         final Node node;
         final String tagName = el.normalName();
         final String data = characterToken.getData();
@@ -318,44 +433,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
         else
             node = new TextNode(data);
         el.appendChild(node); // doesn't use insertNode, because we don't foster these; and will always have a stack.
-        onNodeInserted(node, characterToken);
-    }
-
-    /** Inserts the provided character token into the provided element. Use when not going onto stack element */
-    private void insertNode(Node node, @Nullable Token token) {
-        // if the stack hasn't been set up yet, elements (doctype, comments) go into the doc
-        if (stack.isEmpty())
-            doc.appendChild(node);
-        else if (isFosterInserts() && StringUtil.inSorted(currentElement().normalName(), InTableFoster))
-            insertInFosterParent(node);
-        else
-            currentElement().appendChild(node);
-
-        // connect form controls to their form element
-        if (node instanceof Element && ((Element) node).tag().isFormListed()) {
-            if (formElement != null)
-                formElement.addElement((Element) node);
-        }
-        onNodeInserted(node, token);
-    }
-
-    /** Cleanup duplicate attributes. **/
-    private void dedupeAttributes(StartTag startTag) {
-        if (startTag.hasAttributes() && !startTag.attributes.isEmpty()) {
-            int dupes = startTag.attributes.deduplicate(settings);
-            if (dupes > 0) {
-                error("Dropped duplicate attribute(s) in tag [%s]", startTag.normalName);
-            }
-        }
-    }
-
-    Element pop() {
-        int size = stack.size();
-        return stack.remove(size-1);
-    }
-
-    void push(Element element) {
-        stack.add(element);
+        onNodeInserted(node);
     }
 
     ArrayList<Element> getStack() {
@@ -366,6 +444,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
         return onStack(stack, el);
     }
 
+    /** Checks if there is an HTML element with the given name on the stack. */
     boolean onStack(String elName) {
         return getFromStack(elName) != null;
     }
@@ -383,13 +462,14 @@ public class HtmlTreeBuilder extends TreeBuilder {
         return false;
     }
 
+    /** Gets the nearest (lowest) HTML element with the given name from the stack. */
     @Nullable
     Element getFromStack(String elName) {
         final int bottom = stack.size() - 1;
         final int upper = bottom >= maxQueueDepth ? bottom - maxQueueDepth : 0;
         for (int pos = bottom; pos >= upper; pos--) {
             Element next = stack.get(pos);
-            if (next.normalName().equals(elName)) {
+            if (next.elementIs(elName, NamespaceHtml)) {
                 return next;
             }
         }
@@ -401,34 +481,42 @@ public class HtmlTreeBuilder extends TreeBuilder {
             Element next = stack.get(pos);
             if (next == el) {
                 stack.remove(pos);
+                onNodeClosed(el);
                 return true;
             }
         }
         return false;
     }
 
+    /** Pops the stack until the given HTML element is removed. */
     @Nullable
     Element popStackToClose(String elName) {
         for (int pos = stack.size() -1; pos >= 0; pos--) {
-            Element el = stack.get(pos);
-            stack.remove(pos);
-            if (el.normalName().equals(elName)) {
-                if (currentToken instanceof Token.EndTag)
-                    onNodeClosed(el, currentToken);
+            Element el = pop();
+            if (el.elementIs(elName, NamespaceHtml)) {
                 return el;
             }
         }
         return null;
     }
 
-    // elnames is sorted, comes from Constants
-    void popStackToClose(String... elNames) {
+    /** Pops the stack until an element with the supplied name is removed, irrespective of namespace. */
+    @Nullable
+    Element popStackToCloseAnyNamespace(String elName) {
         for (int pos = stack.size() -1; pos >= 0; pos--) {
-            Element el = stack.get(pos);
-            stack.remove(pos);
-            if (inSorted(el.normalName(), elNames)) {
-                if (currentToken instanceof Token.EndTag)
-                    onNodeClosed(el, currentToken);
+            Element el = pop();
+            if (el.nameIs(elName)) {
+                return el;
+            }
+        }
+        return null;
+    }
+
+    /** Pops the stack until one of the given HTML elements is removed. */
+    void popStackToClose(String... elNames) { // elnames is sorted, comes from Constants
+        for (int pos = stack.size() -1; pos >= 0; pos--) {
+            Element el = pop();
+            if (inSorted(el.normalName(), elNames) && NamespaceHtml.equals(el.tag().namespace())) {
                 break;
             }
         }
@@ -446,16 +534,25 @@ public class HtmlTreeBuilder extends TreeBuilder {
         clearStackToContext("tr", "template");
     }
 
+    /** Removes elements from the stack until one of the supplied HTML elements is removed. */
     private void clearStackToContext(String... nodeNames) {
         for (int pos = stack.size() -1; pos >= 0; pos--) {
             Element next = stack.get(pos);
-            if (StringUtil.in(next.normalName(), nodeNames) || next.normalName().equals("html"))
+            if (NamespaceHtml.equals(next.tag().namespace()) &&
+                (StringUtil.in(next.normalName(), nodeNames) || next.nameIs("html")))
                 break;
             else
-                stack.remove(pos);
+                pop();
         }
     }
 
+    /**
+     Gets the Element immediately above the supplied element on the stack. Which due to adoption, may not necessarily be
+     its parent.
+
+     @param el
+     @return the Element immediately above the supplied element, or null if there is no such element.
+     */
     @Nullable Element aboveOnStack(Element el) {
         assert onStack(el);
         for (int pos = stack.size() -1; pos >= 0; pos--) {
@@ -477,7 +574,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
         replaceInQueue(stack, out, in);
     }
 
-    private void replaceInQueue(ArrayList<Element> queue, Element out, Element in) {
+    private static void replaceInQueue(ArrayList<Element> queue, Element out, Element in) {
         int i = queue.lastIndexOf(out);
         Validate.isTrue(i != -1);
         queue.set(i, in);
@@ -507,6 +604,9 @@ public class HtmlTreeBuilder extends TreeBuilder {
                     node = contextElement;
             }
             String name = node != null ? node.normalName() : "";
+            if (!NamespaceHtml.equals(node.tag().namespace()))
+                continue; // only looking for HTML elements here
+
             switch (name) {
                 case "select":
                     transition(HtmlTreeBuilderState.InSelect);
@@ -568,13 +668,13 @@ public class HtmlTreeBuilder extends TreeBuilder {
     /** Places the body back onto the stack and moves to InBody, for cases in AfterBody / AfterAfterBody when more content comes */
     void resetBody() {
         if (!onStack("body")) {
-            stack.add(doc.body());
+            stack.add(doc.body()); // not onNodeInserted, as already seen
         }
         transition(HtmlTreeBuilderState.InBody);
     }
 
     // todo: tidy up in specific scope methods
-    private String[] specificScopeTarget = {null};
+    private final String[] specificScopeTarget = {null};
 
     private boolean inSpecificScope(String targetName, String[] baseTypes, String[] extraTypes) {
         specificScopeTarget[0] = targetName;
@@ -586,15 +686,24 @@ public class HtmlTreeBuilder extends TreeBuilder {
         final int bottom = stack.size() -1;
         final int top = bottom > MaxScopeSearchDepth ? bottom - MaxScopeSearchDepth : 0;
         // don't walk too far up the tree
-
         for (int pos = bottom; pos >= top; pos--) {
-            final String elName = stack.get(pos).normalName();
-            if (inSorted(elName, targetNames))
-                return true;
-            if (inSorted(elName, baseTypes))
-                return false;
-            if (extraTypes != null && inSorted(elName, extraTypes))
-                return false;
+            Element el = stack.get(pos);
+            String elName = el.normalName();
+            // namespace checks - arguments provided are always in html ns, with this bolt-on for math and svg:
+            String ns = el.tag().namespace();
+            if (ns.equals(NamespaceHtml)) {
+                if (inSorted(elName, targetNames))
+                    return true;
+                if (inSorted(elName, baseTypes))
+                    return false;
+                if (extraTypes != null && inSorted(elName, extraTypes))
+                    return false;
+            } else if (baseTypes == TagsSearchInScope) {
+                if (ns.equals(NamespaceMathml) && inSorted(elName, TagSearchInScopeMath))
+                    return false;
+                if (ns.equals(NamespaceSvg) && inSorted(elName, TagSearchInScopeSvg))
+                    return false;
+            }
         }
         //Validate.fail("Should not be reachable"); // would end up false because hitting 'html' at root (basetypes)
         return false;
@@ -678,7 +787,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
     }
 
     void resetPendingTableCharacters() {
-        pendingTableCharacters = new ArrayList<>();
+        pendingTableCharacters.clear();
     }
 
     List<Token.Character> getPendingTableCharacters() {
@@ -715,12 +824,13 @@ public class HtmlTreeBuilder extends TreeBuilder {
     }
 
     /**
-     Pops elements off the stack according to the implied end tag rules
+     Pops HTML elements off the stack according to the implied end tag rules
      @param thorough if we are thorough (includes table elements etc) or not
      */
     void generateImpliedEndTags(boolean thorough) {
         final String[] search = thorough ? TagThoroughSearchEndTags : TagSearchEndTags;
-        while (inSorted(currentElement().normalName(), search)) {
+        while (NamespaceHtml.equals(currentElement().tag().namespace())
+            && inSorted(currentElement().normalName(), search)) {
             pop();
         }
     }
@@ -731,11 +841,19 @@ public class HtmlTreeBuilder extends TreeBuilder {
         popStackToClose(name);
     }
 
-    boolean isSpecial(Element el) {
-        // todo: mathml's mi, mo, mn
-        // todo: svg's foreigObject, desc, title
+    static boolean isSpecial(Element el) {
+        String namespace = el.tag().namespace();
         String name = el.normalName();
-        return inSorted(name, TagSearchSpecial);
+        switch (namespace) {
+            case NamespaceHtml:
+                return inSorted(name, TagSearchSpecial);
+            case Parser.NamespaceMathml:
+                return inSorted(name, TagSearchSpecialMath);
+            case Parser.NamespaceSvg:
+                return inSorted(name, TagSvgHtmlIntegration);
+            default:
+                return false;
+        }
     }
 
     Element lastFormattingElement() {
@@ -794,7 +912,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
         }
     }
 
-    private boolean isSameFormattingElement(Element a, Element b) {
+    private static boolean isSameFormattingElement(Element a, Element b) {
         // same if: same namespace, tag, and attributes. Element.equals only checks tag, might in future check children
         return a.normalName().equals(b.normalName()) &&
                 // a.namespace().equals(b.namespace()) &&
@@ -830,8 +948,8 @@ public class HtmlTreeBuilder extends TreeBuilder {
 
             // 8. create new element from element, 9 insert into current node, onto stack
             skip = false; // can only skip increment from 4.
-            Element newEl = new Element(tagFor(entry.normalName(), settings), null, entry.attributes().clone());
-            insert(newEl);
+            Element newEl = new Element(tagFor(entry.nodeName(), entry.normalName(), defaultNamespace(), settings), null, entry.attributes().clone());
+            doInsertElement(newEl, null);
 
             // 10. replace entry with new entry
             formattingElements.set(pos, newEl);
@@ -871,7 +989,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
             Element next = formattingElements.get(pos);
             if (next == null) // scope marker
                 break;
-            else if (next.normalName().equals(nodeName))
+            else if (next.nameIs(nodeName))
                 return next;
         }
         return null;
@@ -937,7 +1055,7 @@ public class HtmlTreeBuilder extends TreeBuilder {
                 '}';
     }
 
-    protected boolean isContentForTagData(final String normalName) {
+    @Override protected boolean isContentForTagData(final String normalName) {
         return (normalName.equals("script") || normalName.equals("style"));
     }
 }

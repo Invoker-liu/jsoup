@@ -1,9 +1,11 @@
 package org.jsoup.helper;
 
+import org.jsoup.internal.Normalizer;
 import org.jsoup.internal.StringUtil;
 import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Attributes;
 import org.jsoup.parser.HtmlTreeBuilder;
+import org.jsoup.parser.Parser;
 import org.jsoup.select.NodeTraversor;
 import org.jsoup.select.NodeVisitor;
 import org.jsoup.select.Selector;
@@ -16,8 +18,8 @@ import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.w3c.dom.Text;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
@@ -33,12 +35,12 @@ import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
 import javax.xml.xpath.XPathFactoryConfigurationException;
 import java.io.StringWriter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Stack;
 
 import static javax.xml.transform.OutputKeys.METHOD;
 import static org.jsoup.nodes.Document.OutputSettings.Syntax;
@@ -112,7 +114,6 @@ public class W3CDom {
      * @see #OutputXml
      * @see OutputKeys#ENCODING
      * @see OutputKeys#OMIT_XML_DECLARATION
-     * @see OutputKeys#STANDALONE
      * @see OutputKeys#STANDALONE
      * @see OutputKeys#DOCTYPE_PUBLIC
      * @see OutputKeys#CDATA_SECTION_ELEMENTS
@@ -206,8 +207,12 @@ public class W3CDom {
             org.jsoup.nodes.Document inDoc = in.ownerDocument();
             org.jsoup.nodes.DocumentType doctype = inDoc != null ? inDoc.documentType() : null;
             if (doctype != null) {
-                org.w3c.dom.DocumentType documentType = impl.createDocumentType(doctype.name(), doctype.publicId(), doctype.systemId());
-                out.appendChild(documentType);
+                try {
+                    org.w3c.dom.DocumentType documentType = impl.createDocumentType(doctype.name(), doctype.publicId(), doctype.systemId());
+                    out.appendChild(documentType);
+                } catch (DOMException ignored) {
+                    // invalid / empty doctype dropped
+                }
             }
             out.setXmlStandalone(true);
             // if in is Document, use the root element, not the wrapping document, as the context:
@@ -339,29 +344,32 @@ public class W3CDom {
      * Implements the conversion by walking the input.
      */
     protected static class W3CBuilder implements NodeVisitor {
+        // TODO: move the namespace handling stuff into XmlTreeBuilder / HtmlTreeBuilder, now that Tags have namespaces
         private static final String xmlnsKey = "xmlns";
         private static final String xmlnsPrefix = "xmlns:";
-        private static final String xhtmlNs = "http://www.w3.org/1999/xhtml";
 
         private final Document doc;
         private boolean namespaceAware = true;
-        private final Stack<HashMap<String, String>> namespacesStack = new Stack<>(); // stack of namespaces, prefix => urn
+        private final ArrayDeque<HashMap<String, String>> namespacesStack = new ArrayDeque<>(); // stack of namespaces, prefix => urn
         private Node dest;
         private Syntax syntax = Syntax.xml; // the syntax (to coerce attributes to). From the input doc if available.
-        @Nullable private final org.jsoup.nodes.Element contextElement;
+        /*@Nullable*/ private final org.jsoup.nodes.Element contextElement; // todo - unsure why this can't be marked nullable?
 
         public W3CBuilder(Document doc) {
             this.doc = doc;
             namespacesStack.push(new HashMap<>());
             dest = doc;
             contextElement = (org.jsoup.nodes.Element) doc.getUserData(ContextProperty); // Track the context jsoup Element, so we can save the corresponding w3c element
-            final org.jsoup.nodes.Document inDoc = contextElement.ownerDocument();
-            if (namespaceAware && inDoc != null && inDoc.parser().getTreeBuilder() instanceof HtmlTreeBuilder) {
-              // as per the WHATWG HTML5 spec § 2.1.3, elements are in the HTML namespace by default
-              namespacesStack.peek().put("", xhtmlNs);
+            if (contextElement != null) {
+                final org.jsoup.nodes.Document inDoc = contextElement.ownerDocument();
+                if ( namespaceAware && inDoc != null && inDoc.parser().getTreeBuilder() instanceof HtmlTreeBuilder ) {
+                    // as per the WHATWG HTML5 spec § 2.1.3, elements are in the HTML namespace by default
+                    namespacesStack.peek().put("", Parser.NamespaceHtml);
+                }
             }
-          }
+        }
 
+        @Override
         public void head(org.jsoup.nodes.Node source, int depth) {
             namespacesStack.push(new HashMap<>(namespacesStack.peek())); // inherit from above on the stack
             if (source instanceof org.jsoup.nodes.Element) {
@@ -369,12 +377,7 @@ public class W3CDom {
 
                 String prefix = updateNamespaces(sourceEl);
                 String namespace = namespaceAware ? namespacesStack.peek().get(prefix) : null;
-                String tagName = sourceEl.tagName();
-
-                /* Tag names in XML are quite permissive, but less permissive than HTML. Rather than reimplement the validation,
-                we just try to use it as-is. If it fails, insert as a text node instead. We don't try to normalize the
-                tagname to something safe, because that isn't going to be meaningful downstream. This seems(?) to be
-                how browsers handle the situation, also. https://github.com/jhy/jsoup/issues/1093 */
+                String tagName = Normalizer.xmlSafeTagName(sourceEl.tagName());
                 try {
                     // use an empty namespace if none is present but the tag name has a prefix
                     String imputedNamespace = namespace == null && tagName.contains(":") ? "" : namespace;
@@ -385,6 +388,7 @@ public class W3CDom {
                         doc.setUserData(ContextNodeProperty, el, null);
                     dest = el; // descend
                 } catch (DOMException e) {
+                    // If the Normalize didn't get it XML / W3C safe, inserts as plain text
                     append(doc.createTextNode("<" + tagName + ">"), sourceEl);
                 }
             } else if (source instanceof org.jsoup.nodes.TextNode) {
@@ -409,6 +413,7 @@ public class W3CDom {
             dest.appendChild(append);
         }
 
+        @Override
         public void tail(org.jsoup.nodes.Node source, int depth) {
             if (source instanceof org.jsoup.nodes.Element && dest.getParentNode() instanceof Element) {
                 dest = dest.getParentNode(); // undescend
@@ -418,9 +423,17 @@ public class W3CDom {
 
         private void copyAttributes(org.jsoup.nodes.Node source, Element el) {
             for (Attribute attribute : source.attributes()) {
-                String key = Attribute.getValidKey(attribute.getKey(), syntax);
-                if (key != null) { // null if couldn't be coerced to validity
-                    el.setAttribute(key, attribute.getValue());
+                // the W3C DOM has a different allowed set of characters than HTML5 (that Attribute.getValidKey return, partic does not allow ';'). So if we except when using HTML, go to more restricted XML
+                try {
+                    String key = Attribute.getValidKey(attribute.getKey(), syntax);
+                    if (key != null) // null if couldn't be coerced to validity
+                        el.setAttribute(key, attribute.getValue());
+                } catch (DOMException e) {
+                    if (syntax != Syntax.xml) {
+                        String key = Attribute.getValidKey(attribute.getKey(), Syntax.xml);
+                        if (key != null)
+                            el.setAttribute(key, attribute.getValue()); // otherwise, will skip attribute
+                    }
                 }
             }
         }

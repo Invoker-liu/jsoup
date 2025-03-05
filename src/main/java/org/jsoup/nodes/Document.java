@@ -11,12 +11,12 @@ import org.jsoup.parser.Tag;
 import org.jsoup.select.Elements;
 import org.jsoup.select.Evaluator;
 import org.jsoup.select.Selector;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.nio.charset.Charset;
-import java.nio.charset.CharsetEncoder;
-import java.util.ArrayList;
 import java.util.List;
+
+import static org.jsoup.parser.Parser.NamespaceHtml;
 
 /**
  A HTML Document.
@@ -28,22 +28,32 @@ public class Document extends Element {
     private Parser parser; // the parser used to parse this document
     private QuirksMode quirksMode = QuirksMode.noQuirks;
     private final String location;
-    private boolean updateMetaCharset = false;
 
     /**
-     Create a new, empty Document.
+     Create a new, empty Document, in the specified namespace.
+     @param namespace the namespace of this Document's root node.
      @param baseUri base URI of document
      @see org.jsoup.Jsoup#parse
      @see #createShell
      */
-    public Document(String baseUri) {
-        super(Tag.valueOf("#root", ParseSettings.htmlDefault), baseUri);
+    public Document(String namespace, String baseUri) {
+        super(Tag.valueOf("#root", namespace, ParseSettings.htmlDefault), baseUri);
         this.location = baseUri;
         this.parser = Parser.htmlParser(); // default, but overridable
     }
 
     /**
-     Create a valid, empty shell of a document, suitable for adding more elements to.
+     Create a new, empty Document, in the HTML namespace.
+     @param baseUri base URI of document
+     @see org.jsoup.Jsoup#parse
+     @see #Document(String namespace, String baseUri)
+     */
+    public Document(String baseUri) {
+        this(NamespaceHtml, baseUri);
+    }
+
+    /**
+     Create a valid, empty shell of an HTML document, suitable for adding more elements to.
      @param baseUri baseUri of document
      @return document with html, head, and body elements.
      */
@@ -51,7 +61,6 @@ public class Document extends Element {
         Validate.notNull(baseUri);
 
         Document doc = new Document(baseUri);
-        doc.parser = doc.parser();
         Element html = doc.appendElement("html");
         html.appendElement("head");
         html.appendElement("body");
@@ -104,7 +113,7 @@ public class Document extends Element {
     private Element htmlEl() {
         Element el = firstElementChild();
         while (el != null) {
-            if (el.normalName().equals("html"))
+            if (el.nameIs("html"))
                 return el;
             el = el.nextElementSibling();
         }
@@ -114,7 +123,7 @@ public class Document extends Element {
     /**
      Get this document's {@code head} element.
      <p>
-     As a side-effect, if this Document does not already have a HTML structure, it will be created. If you do not want
+     As a side effect, if this Document does not already have an HTML structure, it will be created. If you do not want
      that, use {@code #selectFirst("head")} instead.
 
      @return {@code head} element.
@@ -123,7 +132,7 @@ public class Document extends Element {
         final Element html = htmlEl();
         Element el = html.firstElementChild();
         while (el != null) {
-            if (el.normalName().equals("head"))
+            if (el.nameIs("head"))
                 return el;
             el = el.nextElementSibling();
         }
@@ -133,7 +142,7 @@ public class Document extends Element {
     /**
      Get this document's {@code <body>} or {@code <frameset>} element.
      <p>
-     As a <b>side-effect</b>, if this Document does not already have a HTML structure, it will be created with a {@code
+     As a <b>side-effect</b>, if this Document does not already have an HTML structure, it will be created with a {@code
     <body>} element. If you do not want that, use {@code #selectFirst("body")} instead.
 
      @return {@code body} element for documents with a {@code <body>}, a new {@code <body>} element if the document
@@ -143,7 +152,7 @@ public class Document extends Element {
         final Element html = htmlEl();
         Element el = html.firstElementChild();
         while (el != null) {
-            if ("body".equals(el.normalName()) || "frameset".equals(el.normalName()))
+            if (el.nameIs("body") || el.nameIs("frameset"))
                 return el;
             el = el.nextElementSibling();
         }
@@ -208,7 +217,7 @@ public class Document extends Element {
      @return new element
      */
     public Element createElement(String tagName) {
-        return new Element(Tag.valueOf(tagName, ParseSettings.preserveCase), this.baseUri());
+        return new Element(Tag.valueOf(tagName, parser.defaultNamespace(), ParseSettings.preserveCase), this.baseUri());
     }
 
     @Override
@@ -218,7 +227,7 @@ public class Document extends Element {
 
     /**
      Set the text of the {@code body} of this document. Any existing nodes within the body will be cleared.
-     @param text unencoded text
+     @param text un-encoded text
      @return this document
      */
     @Override
@@ -231,149 +240,103 @@ public class Document extends Element {
     public String nodeName() {
         return "#document";
     }
-    
+
     /**
-     * Sets the charset used in this document. This method is equivalent
-     * to {@link OutputSettings#charset(java.nio.charset.Charset)
-     * OutputSettings.charset(Charset)} but in addition it updates the
-     * charset / encoding element within the document.
-     * 
-     * <p>This enables
-     * {@link #updateMetaCharsetElement(boolean) meta charset update}.</p>
-     * 
-     * <p>If there's no element with charset / encoding information yet it will
-     * be created. Obsolete charset / encoding definitions are removed!</p>
-     * 
-     * <p><b>Elements used:</b></p>
-     * 
-     * <ul>
-     * <li><b>Html:</b> <i>&lt;meta charset="CHARSET"&gt;</i></li>
-     * <li><b>Xml:</b> <i>&lt;?xml version="1.0" encoding="CHARSET"&gt;</i></li>
-     * </ul>
-     * 
-     * @param charset Charset
-     * 
-     * @see #updateMetaCharsetElement(boolean) 
-     * @see OutputSettings#charset(java.nio.charset.Charset) 
+     Set the output character set of this Document. This method is equivalent to
+     {@link OutputSettings#charset(java.nio.charset.Charset) OutputSettings.charset(Charset)}, but additionally adds or
+     updates the charset / encoding element within the Document.
+
+     <p>If there's no existing element with charset / encoding information yet, one will
+     be created. Obsolete charset / encoding definitions are removed.</p>
+
+     <p><b>Elements used:</b></p>
+
+     <ul>
+     <li><b>HTML:</b> <i>&lt;meta charset="CHARSET"&gt;</i></li>
+     <li><b>XML:</b> <i>&lt;?xml version="1.0" encoding="CHARSET"&gt;</i></li>
+     </ul>
+
+     @param charset Charset
+     @see OutputSettings#charset(java.nio.charset.Charset)
      */
     public void charset(Charset charset) {
-        updateMetaCharsetElement(true);
         outputSettings.charset(charset);
         ensureMetaCharsetElement();
     }
-    
+
     /**
-     * Returns the charset used in this document. This method is equivalent
-     * to {@link OutputSettings#charset()}.
-     * 
-     * @return Current Charset
-     * 
-     * @see OutputSettings#charset() 
+     Get the output character set of this Document. This method is equivalent to {@link OutputSettings#charset()}.
+
+     @return the current Charset
+     @see OutputSettings#charset()
      */
     public Charset charset() {
         return outputSettings.charset();
     }
-    
+
     /**
-     * Sets whether the element with charset information in this document is
-     * updated on changes through {@link #charset(java.nio.charset.Charset)
-     * Document.charset(Charset)} or not.
-     * 
-     * <p>If set to <tt>false</tt> <i>(default)</i> there are no elements
-     * modified.</p>
-     * 
-     * @param update If <tt>true</tt> the element updated on charset
-     * changes, <tt>false</tt> if not
-     * 
-     * @see #charset(java.nio.charset.Charset) 
+     @deprecated this setting has no effect; the meta charset element is always updated when
+     {@link Document#charset(Charset)} is called. This method will be removed in jsoup 1.20.1.
      */
-    public void updateMetaCharsetElement(boolean update) {
-        this.updateMetaCharset = update;
-    }
-    
+    @Deprecated
+    public void updateMetaCharsetElement(boolean noop) {}
+
     /**
-     * Returns whether the element with charset information in this document is
-     * updated on changes through {@link #charset(java.nio.charset.Charset)
-     * Document.charset(Charset)} or not.
-     * 
-     * @return Returns <tt>true</tt> if the element is updated on charset
-     * changes, <tt>false</tt> if not
+     @deprecated this setting has no effect; the meta charset element is always updated when
+     {@link Document#charset(Charset)} is called. This method will be removed in jsoup 1.20.1.
      */
+    @Deprecated
     public boolean updateMetaCharsetElement() {
-        return updateMetaCharset;
+        return true;
     }
 
     @Override
     public Document clone() {
         Document clone = (Document) super.clone();
         clone.outputSettings = this.outputSettings.clone();
+        clone.parser = this.parser.clone();
         return clone;
     }
 
     @Override
     public Document shallowClone() {
-        Document clone = new Document(baseUri());
+        Document clone = new Document(this.tag().namespace(), baseUri());
         if (attributes != null)
             clone.attributes = attributes.clone();
         clone.outputSettings = this.outputSettings.clone();
         return clone;
     }
     
-    /**
-     * Ensures a meta charset (html) or xml declaration (xml) with the current
-     * encoding used. This only applies with
-     * {@link #updateMetaCharsetElement(boolean) updateMetaCharset} set to
-     * <tt>true</tt>, otherwise this method does nothing.
-     * 
-     * <ul>
-     * <li>An existing element gets updated with the current charset</li>
-     * <li>If there's no element yet it will be inserted</li>
-     * <li>Obsolete elements are removed</li>
-     * </ul>
-     * 
-     * <p><b>Elements used:</b></p>
-     * 
-     * <ul>
-     * <li><b>Html:</b> <i>&lt;meta charset="CHARSET"&gt;</i></li>
-     * <li><b>Xml:</b> <i>&lt;?xml version="1.0" encoding="CHARSET"&gt;</i></li>
-     * </ul>
-     */
-    private void ensureMetaCharsetElement() {
-        if (updateMetaCharset) {
-            OutputSettings.Syntax syntax = outputSettings().syntax();
 
-            if (syntax == OutputSettings.Syntax.html) {
-                Element metaCharset = selectFirst("meta[charset]");
-                if (metaCharset != null) {
-                    metaCharset.attr("charset", charset().displayName());
-                } else {
-                    head().appendElement("meta").attr("charset", charset().displayName());
-                }
-                select("meta[name=charset]").remove(); // Remove obsolete elements
-            } else if (syntax == OutputSettings.Syntax.xml) {
-                Node node = ensureChildNodes().get(0);
-                if (node instanceof XmlDeclaration) {
-                    XmlDeclaration decl = (XmlDeclaration) node;
-                    if (decl.name().equals("xml")) {
-                        decl.attr("encoding", charset().displayName());
-                        if (decl.hasAttr("version"))
-                            decl.attr("version", "1.0");
-                    } else {
-                        decl = new XmlDeclaration("xml", false);
-                        decl.attr("version", "1.0");
-                        decl.attr("encoding", charset().displayName());
-                        prependChild(decl);
-                    }
-                } else {
-                    XmlDeclaration decl = new XmlDeclaration("xml", false);
-                    decl.attr("version", "1.0");
-                    decl.attr("encoding", charset().displayName());
-                    prependChild(decl);
-                }
+    private void ensureMetaCharsetElement() {
+        OutputSettings.Syntax syntax = outputSettings().syntax();
+
+        if (syntax == OutputSettings.Syntax.html) {
+            Element metaCharset = selectFirst("meta[charset]");
+            if (metaCharset != null) {
+                metaCharset.attr("charset", charset().displayName());
+            } else {
+                head().appendElement("meta").attr("charset", charset().displayName());
             }
+            select("meta[name=charset]").remove(); // Remove obsolete elements
+        } else if (syntax == OutputSettings.Syntax.xml) {
+            XmlDeclaration decl = ensureXmlDecl();
+            decl.attr("version", "1.0");
+            decl.attr("encoding", charset().displayName());
         }
     }
-    
+
+    private XmlDeclaration ensureXmlDecl() {
+        Node node = firstChild();
+        if (node instanceof XmlDeclaration) {
+            XmlDeclaration decl = (XmlDeclaration) node;
+            if (decl.name().equals("xml")) return decl;
+        }
+        XmlDeclaration decl = new XmlDeclaration("xml", false);
+        prependChild(decl);
+        return decl;
+    }
+
 
     /**
      * A Document's output settings control the form of the text() and html() methods.
@@ -383,27 +346,32 @@ public class Document extends Element {
          * The output serialization syntax.
          */
         public enum Syntax {html, xml}
-
         private Entities.EscapeMode escapeMode = Entities.EscapeMode.base;
         private Charset charset = DataUtil.UTF_8;
-        private final ThreadLocal<CharsetEncoder> encoderThreadLocal = new ThreadLocal<>(); // initialized by start of OuterHtmlVisitor
-        @Nullable Entities.CoreCharset coreCharset; // fast encoders for ascii and utf8
-
         private boolean prettyPrint = true;
         private boolean outline = false;
         private int indentAmount = 1;
         private int maxPaddingWidth = 30;
         private Syntax syntax = Syntax.html;
 
-        public OutputSettings() {}
-        
         /**
-         * Get the document's current HTML escape mode: <code>base</code>, which provides a limited set of named HTML
-         * entities and escapes other characters as numbered entities for maximum compatibility; or <code>extended</code>,
-         * which uses the complete set of HTML named entities.
-         * <p>
-         * The default escape mode is <code>base</code>.
-         * @return the document's current escape mode
+         Create a new OutputSettings object, with the default settings (UTF-8, HTML, EscapeMode.base, pretty-printing,
+         indent amount of 1).
+         */
+        public OutputSettings() {
+        }
+
+        /**
+         Get the document's current entity escape mode:
+         <ul>
+         <li><code>xhtml</code>, the minimal named entities in XHTML / XML</li>
+         <li><code>base</code>, which provides a limited set of named HTML
+         entities and escapes other characters as numbered entities for maximum compatibility</li>
+         <li><code>extended</code>,
+         which uses the complete set of HTML named entities.</li>
+         </ul>
+         <p>The default escape mode is <code>base</code>.
+         @return the document's current escape mode
          */
         public Entities.EscapeMode escapeMode() {
             return escapeMode;
@@ -452,19 +420,6 @@ public class Document extends Element {
             return this;
         }
 
-        CharsetEncoder prepareEncoder() {
-            // created at start of OuterHtmlVisitor so each pass has own encoder, so OutputSettings can be shared among threads
-            CharsetEncoder encoder = charset.newEncoder();
-            encoderThreadLocal.set(encoder);
-            coreCharset = Entities.CoreCharset.byName(encoder.charset().name());
-            return encoder;
-        }
-
-        CharsetEncoder encoder() {
-            CharsetEncoder encoder = encoderThreadLocal.get();
-            return encoder != null ? encoder : prepareEncoder();
-        }
-
         /**
          * Get the document's current output syntax.
          * @return current syntax
@@ -476,11 +431,15 @@ public class Document extends Element {
         /**
          * Set the document's output syntax. Either {@code html}, with empty tags and boolean attributes (etc), or
          * {@code xml}, with self-closing tags.
+         * <p>When set to {@link Document.OutputSettings.Syntax#xml xml}, the {@link #escapeMode() escapeMode} is
+         * automatically set to {@link Entities.EscapeMode#xhtml}, but may be subsequently changed if desired.</p>
          * @param syntax serialization syntax
          * @return the document's output settings, for chaining
          */
         public OutputSettings syntax(Syntax syntax) {
             this.syntax = syntax;
+            if (syntax == Syntax.xml)
+                this.escapeMode(Entities.EscapeMode.xhtml);
             return this;
         }
 
@@ -570,7 +529,7 @@ public class Document extends Element {
             } catch (CloneNotSupportedException e) {
                 throw new RuntimeException(e);
             }
-            clone.charset(charset.name()); // new charset and charset encoder
+            clone.charset(charset.name()); // new charset, coreCharset, and charset encoder
             clone.escapeMode = Entities.EscapeMode.valueOf(escapeMode.name());
             // indentAmount, maxPaddingWidth, and prettyPrint are primitives so object.clone() will handle
             return clone;

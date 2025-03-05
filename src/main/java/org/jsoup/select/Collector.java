@@ -1,12 +1,10 @@
 package org.jsoup.select;
 
 import org.jsoup.nodes.Element;
-import org.jsoup.nodes.Node;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
-
-import static org.jsoup.select.NodeFilter.FilterResult.CONTINUE;
-import static org.jsoup.select.NodeFilter.FilterResult.STOP;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Collects a list of elements that match the supplied criteria.
@@ -18,22 +16,26 @@ public class Collector {
     private Collector() {}
 
     /**
-     Build a list of elements, by visiting root and every descendant of root, and testing it against the evaluator.
+     Build a list of elements, by visiting the root and every descendant of root, and testing it against the Evaluator.
      @param eval Evaluator to test elements against
      @param root root of tree to descend
      @return list of matches; empty if none
      */
-    public static Elements collect (Evaluator eval, Element root) {
-        eval.reset();
-        Elements elements = new Elements();
-        NodeTraversor.traverse((node, depth) -> {
-            if (node instanceof Element) {
-                Element el = (Element) node;
-                if (eval.matches(root, el))
-                    elements.add(el);
-            }
-        }, root);
-        return elements;
+    public static Elements collect(Evaluator eval, Element root) {
+        return stream(eval, root).collect(Collectors.toCollection(Elements::new));
+    }
+
+    /**
+     Obtain a Stream of elements by visiting the root and every descendant of root and testing it against the evaluator.
+
+     @param evaluator Evaluator to test elements against
+     @param root root of tree to descend
+     @return A {@link Stream} of matches
+     @since 1.19.1
+     */
+    public static Stream<Element> stream(Evaluator evaluator, Element root) {
+        evaluator.reset();
+        return root.stream().filter(evaluator.asPredicate(root));
     }
 
     /**
@@ -44,37 +46,6 @@ public class Collector {
      @return the first match; {@code null} if none
      */
     public static @Nullable Element findFirst(Evaluator eval, Element root) {
-        eval.reset();
-        FirstFinder finder = new FirstFinder(eval);
-        return finder.find(root, root);
-    }
-
-    static class FirstFinder implements NodeFilter {
-        private @Nullable Element evalRoot = null;
-        private @Nullable Element match = null;
-        private final Evaluator eval;
-
-        FirstFinder(Evaluator eval) {
-            this.eval = eval;
-        }
-
-        @Nullable Element find(Element root, Element start) {
-            evalRoot = root;
-            match = null;
-            NodeTraversor.filter(this, start);
-            return match;
-        }
-
-        @Override
-        public FilterResult head(Node node, int depth) {
-            if (node instanceof Element) {
-                Element el = (Element) node;
-                if (eval.matches(evalRoot, el)) {
-                    match = el;
-                    return STOP;
-                }
-            }
-            return CONTINUE;
-        }
+        return stream(eval, root).findFirst().orElse(null);
     }
 }

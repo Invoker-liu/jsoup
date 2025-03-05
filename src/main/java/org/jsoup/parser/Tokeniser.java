@@ -2,9 +2,10 @@ package org.jsoup.parser;
 
 import org.jsoup.helper.Validate;
 import org.jsoup.internal.StringUtil;
+import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Entities;
+import org.jspecify.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.util.Arrays;
 
 /**
@@ -38,23 +39,28 @@ final class Tokeniser {
     private boolean isEmitPending = false;
     @Nullable private String charsString = null; // characters pending an emit. Will fall to charsBuilder if more than one
     private final StringBuilder charsBuilder = new StringBuilder(1024); // buffers characters to output as one token, if more than one emit per read
-    StringBuilder dataBuffer = new StringBuilder(1024); // buffers data looking for </script>
+    final StringBuilder dataBuffer = new StringBuilder(1024); // buffers data looking for </script>
 
-    Token.StartTag startPending = new Token.StartTag();
-    Token.EndTag endPending = new Token.EndTag();
-    Token.Tag tagPending = startPending; // tag we are building up: start or end pending
-    Token.Character charPending = new Token.Character();
-    Token.Doctype doctypePending = new Token.Doctype(); // doctype building up
-    Token.Comment commentPending = new Token.Comment(); // comment building up
+    final Document.OutputSettings.Syntax syntax; // html or xml syntax; affects processing of xml declarations vs as bogus comments
+    final Token.StartTag startPending;
+    final Token.EndTag endPending;
+    Token.Tag tagPending; // tag we are building up: start or end pending
+    final Token.Character charPending = new Token.Character();
+    final Token.Doctype doctypePending = new Token.Doctype(); // doctype building up
+    final Token.Comment commentPending = new Token.Comment(); // comment building up
+    final Token.XmlDecl xmlDeclPending; // xml decl building up
     @Nullable private String lastStartTag; // the last start tag emitted, to test appropriate end tag
     @Nullable private String lastStartCloseSeq; // "</" + lastStartTag, so we can quickly check for that in RCData
 
-    private static final int Unset = -1;
-    private int markupStartPos, charStartPos = Unset; // reader pos at the start of markup / characters. updated on state transition
+    private int markupStartPos, charStartPos = 0; // reader pos at the start of markup / characters. markup updated on state transition, char on token emit.
 
-    Tokeniser(CharacterReader reader, ParseErrorList errors) {
-        this.reader = reader;
-        this.errors = errors;
+    Tokeniser(TreeBuilder treeBuilder) {
+        syntax = treeBuilder instanceof XmlTreeBuilder ? Document.OutputSettings.Syntax.xml : Document.OutputSettings.Syntax.html;
+        tagPending = startPending  = new Token.StartTag(treeBuilder);
+        endPending = new Token.EndTag(treeBuilder);
+        xmlDeclPending = new Token.XmlDecl(treeBuilder);
+        this.reader = treeBuilder.reader;
+        this.errors = treeBuilder.parser.getErrors();
     }
 
     Token read() {
@@ -88,7 +94,7 @@ final class Tokeniser {
         isEmitPending = true;
         token.startPos(markupStartPos);
         token.endPos(reader.pos());
-        charStartPos = Unset;
+        charStartPos = reader.pos(); // update char start when we complete a token emit
 
         if (token.type == Token.TokenType.StartTag) {
             Token.StartTag startTag = (Token.StartTag) token;
@@ -156,15 +162,9 @@ final class Tokeniser {
     }
 
     void transition(TokeniserState newState) {
-        // track markup / data position on state transitions
-        switch (newState) {
-            case TagOpen:
-                markupStartPos = reader.pos();
-                break;
-            case Data:
-                if (charStartPos == Unset) // don't reset when we are jumping between e.g data -> char ref -> data
-                    charStartPos = reader.pos();
-        }
+        // track markup position on state transitions
+        if (newState == TokeniserState.TagOpen)
+            markupStartPos = reader.pos();
 
         this.state = newState;
     }
@@ -203,8 +203,11 @@ final class Tokeniser {
                 int base = isHexMode ? 16 : 10;
                 charval = Integer.valueOf(numRef, base);
             } catch (NumberFormatException ignored) {
-            } // skip
-            if (charval == -1 || (charval >= 0xD800 && charval <= 0xDFFF) || charval > 0x10FFFF) {
+                // skip
+            }
+            // todo: check for extra illegal unicode points as parse errors - described https://html.spec.whatwg.org/multipage/syntax.html#character-references and in Infra
+            // The numeric character reference forms described above are allowed to reference any code point excluding U+000D CR, noncharacters, and controls other than ASCII whitespace.
+            if (charval == -1 || charval > 0x10FFFF) {
                 characterReferenceError("character [%s] outside of valid range", charval);
                 codeRef[0] = replacementChar;
             } else {
@@ -230,7 +233,12 @@ final class Tokeniser {
                 reader.rewindToMark();
                 if (looksLegit) // named with semicolon
                     characterReferenceError("invalid named reference [%s]", nameRef);
-                return null;
+                if (inAttribute) return null;
+                // check if there's a base prefix match; consume and use that if so
+                String prefix = Entities.findPrefix(nameRef);
+                if (prefix.isEmpty()) return null;
+                reader.matchConsume(prefix);
+                nameRef = prefix;
             }
             if (inAttribute && (reader.matchesLetter() || reader.matchesDigit() || reader.matchesAny('=', '-', '_'))) {
                 // don't want that to match
@@ -257,6 +265,13 @@ final class Tokeniser {
     Token.Tag createTagPending(boolean start) {
         tagPending = start ? startPending.reset() : endPending.reset();
         return tagPending;
+    }
+
+    Token.XmlDecl createXmlDeclPending(boolean isDeclaration) {
+        Token.XmlDecl decl = xmlDeclPending.reset();
+        decl.isDeclaration = isDeclaration;
+        tagPending = decl;
+        return decl;
     }
 
     void emitTagPending() {
@@ -327,13 +342,6 @@ final class Tokeniser {
     void error(String errorMsg, Object... args) {
         if (errors.canAddError())
             errors.add(new ParseError(reader, errorMsg, args));
-    }
-
-    boolean currentNodeInHtmlNS() {
-        // todo: implement namespaces correctly
-        return true;
-        // Element currentNode = currentNode();
-        // return currentNode != null && currentNode.namespace().equals("HTML");
     }
 
     /**
